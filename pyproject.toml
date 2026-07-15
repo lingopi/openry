@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openry"
+version = "0.1.0"
+description = "Command forwarder for ReAct Agent workflow systems"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "OpenRY Contributors"}
+]
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+openry = "openry.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["openry*"]
