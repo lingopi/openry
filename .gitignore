@@ -8,3 +8,6 @@ venv/
 .env
 .openry/
 *.db
+design/
+docs/
+recode.md
