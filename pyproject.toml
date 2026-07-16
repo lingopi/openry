@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 openry = "openry.cli:main"
+openry-orchestrator = "openry.orchestrator.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["openry*"]
