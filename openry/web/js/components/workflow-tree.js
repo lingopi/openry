@@ -211,9 +211,14 @@ const WorkflowTree = {
       const steps = comp.steps || [];
       const detail = document.getElementById('workflowDetail');
 
-      // Only update tree section (big_step + sub_step rows), keep payload + step-detail untouched
       const existingTree = detail.querySelector('.comp-tree');
       if (!existingTree) return;
+
+      // Save collapsed state before replacing
+      const collapsedRefs = new Set();
+      existingTree.querySelectorAll('.big-step.collapsed').forEach(el => {
+        collapsedRefs.add(el.dataset.ref);
+      });
 
       // Group by big_step_ref
       const groups = {};
@@ -225,7 +230,8 @@ const WorkflowTree = {
 
       let html = '';
       for (const [ref, groupSteps] of Object.entries(groups)) {
-        html += `<div class="big-step" data-ref="${ref}">
+        const collapsed = collapsedRefs.has(ref) ? ' collapsed' : '';
+        html += `<div class="big-step${collapsed}" data-ref="${ref}">
           <div class="big-step-header" onclick="WorkflowTree._toggleBigStep(this)">
             <span class="big-step-arrow">▼</span>
             <span>📦 ${ref}</span>

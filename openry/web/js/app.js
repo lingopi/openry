@@ -4,6 +4,12 @@
 const App = {
   _currentView: 'workflows',
   _events: null,
+  _historyPage: 1,
+  _historyPerPage: 10,
+  _historyStatus: '',
+  _historyTotalPages: 1,
+  _cmdPage: 1,
+  _cmdPerPage: 10,
 
   init() {
     // Navigation
@@ -18,11 +24,24 @@ const App = {
       WorkflowTree.loadWorkflows();
     });
     document.getElementById('btnRefreshCommands').addEventListener('click', () => {
+      this._cmdPage = 1;
+      this._loadCommands();
+    });
+
+    // Commands filter: reset to page 1 on change
+    document.getElementById('cmdStatusFilter').addEventListener('change', () => {
+      this._cmdPage = 1;
+      this._loadCommands();
+    });
+    document.getElementById('cmdRunIdFilter').addEventListener('change', () => {
+      this._cmdPage = 1;
       this._loadCommands();
     });
 
     // History filter
     document.getElementById('historyStatusFilter').addEventListener('change', () => {
+      this._historyPage = 1;
+      this._historyStatus = document.getElementById('historyStatusFilter').value;
       this._loadHistory();
     });
 
@@ -62,52 +81,68 @@ const App = {
   async _loadHistory() {
     const tbody = document.getElementById('historyBody');
     tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">Loading...</td></tr>';
+    document.getElementById('historyDetail').classList.add('hidden');
 
-    const status = document.getElementById('historyStatusFilter').value;
+    const params = { page: this._historyPage, per_page: this._historyPerPage };
+    if (this._historyStatus) params.status = this._historyStatus;
+
     try {
-      const data = await API.getCompositions({ limit: 50, ...(status ? { status } : {}) });
+      const data = await API.getCompositions(params);
       const comps = data.compositions || [];
+      this._historyTotalPages = data.total_pages || 1;
 
       if (comps.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">No runs found</td></tr>';
-        return;
+      } else {
+        tbody.innerHTML = comps.map(c => {
+          const icon = c.status === 'completed' ? '✅' : c.status === 'failed' ? '❌' : c.status === 'running' ? '🔄' : '⏳';
+          return `<tr onclick="App._showHistoryDetail(${c.id})" data-comp-id="${c.id}">
+            <td style="font-family:monospace;color:var(--accent)">#${c.id}</td>
+            <td>${c.composition}</td>
+            <td>${icon} ${c.status}</td>
+            <td style="color:var(--text-muted)">${c.current_big_step || '-'}</td>
+            <td style="font-size:11px;color:var(--text-muted)">${c.created_at || '-'}</td>
+          </tr>`;
+        }).join('');
       }
-
-      tbody.innerHTML = comps.map(c => {
-        const statusIcon = c.status === 'completed' ? '✅' : c.status === 'failed' ? '❌' : c.status === 'running' ? '🔄' : '⏳';
-        return `<tr onclick="App._showHistoryDetail(${c.id})" data-comp-id="${c.id}">
-          <td style="font-family:monospace;color:var(--accent)">#${c.id}</td>
-          <td>${c.composition}</td>
-          <td>${statusIcon} ${c.status}</td>
-          <td style="color:var(--text-muted)">${c.current_big_step || '-'}</td>
-          <td style="font-size:11px;color:var(--text-muted)">${c.created_at || '-'}</td>
-        </tr>`;
-      }).join('');
-
+      this._renderPagination();
     } catch (e) {
       tbody.innerHTML = `<tr><td colspan="5" class="empty-cell">⚠️ ${e.message}</td></tr>`;
     }
   },
 
+  _renderPagination() {
+    const pg = document.getElementById('historyPagination');
+    if (this._historyTotalPages <= 1) { pg.innerHTML = ''; return; }
+
+    let html = `<span class="pg-info">Page ${this._historyPage} / ${this._historyTotalPages}</span>`;
+    html += `<button class="btn btn-sm" ${this._historyPage <= 1 ? 'disabled' : ''} onclick="App._goPage(${this._historyPage - 1})">◀ Prev</button>`;
+    html += `<button class="btn btn-sm" ${this._historyPage >= this._historyTotalPages ? 'disabled' : ''} onclick="App._goPage(${this._historyPage + 1})">Next ▶</button>`;
+    pg.innerHTML = html;
+  },
+
+  _goPage(p) {
+    if (p < 1 || p > this._historyTotalPages) return;
+    this._historyPage = p;
+    this._loadHistory();
+  },
+
   async _showHistoryDetail(id) {
-    // Highlight row
     document.querySelectorAll('#historyBody tr').forEach(r => r.classList.remove('active'));
     const row = document.querySelector(`#historyBody tr[data-comp-id="${id}"]`);
     if (row) row.classList.add('active');
 
-    // Show detail
     const detail = document.getElementById('historyDetail');
     detail.classList.remove('hidden');
-    detail.innerHTML = '<div class="empty-state"><p>Loading detail...</p></div>';
+    detail.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
 
     try {
       const data = await API.getComposition(id);
       const comp = data.composition;
       const steps = comp.steps || [];
 
-      let html = `<h3 style="margin-bottom:12px">📋 ${comp.composition} <span style="font-weight:400;font-size:13px">#${comp.id}</span></h3>`;
+      let html = `<h3 style="margin-bottom:12px">📋 ${comp.composition} <span style="font-weight:400;font-size:13px">#${comp.id}</span> — ${comp.status}</h3>`;
 
-      // Group by big_step_ref
       const groups = {};
       steps.forEach(s => {
         const ref = s.big_step_ref || 'default';
@@ -117,13 +152,14 @@ const App = {
 
       for (const [ref, groupSteps] of Object.entries(groups)) {
         html += `<div class="big-step"><div class="big-step-header" onclick="this.parentElement.classList.toggle('collapsed')"><span class="big-step-arrow">▼</span><span>📦 ${ref}</span></div><div class="big-step-body">`;
-        groupSteps.forEach((s, i) => {
-          const icon = s.status === 'completed' ? '✅' : s.status === 'failed' ? '❌' : s.status === 'in_progress' ? '🔄' : '⏳';
-          html += `<div class="sub-step">
-            <span class="sub-step-id">${s.sub_step_id || `step-${i+1}`}</span>
+        groupSteps.forEach((s) => {
+          const icon = s.status === 'completed' || s.status === 'done' ? '✅' : s.status === 'failed' ? '❌' : s.status === 'in_progress' ? '🔄' : '⏳';
+          html += `<div class="sub-step" data-run-id="${s.run_id}" onclick="App._loadHistoryTranscript(event, '${s.run_id}')" style="cursor:pointer">
+            <span class="sub-step-id">${s.sub_step_id || s.step_id || '—'}</span>
             <span class="sub-step-desc">${icon} ${s.status}</span>
-            <span class="sub-step-stats">${s.run_id ? s.run_id.substring(0,12) : ''}</span>
-          </div>`;
+            <span class="sub-step-stats" style="color:var(--accent)">${s.run_id ? s.run_id.substring(0,12) : ''}</span>
+          </div>
+          <div class="transcript-inline" id="ht-${s.run_id}" style="display:none"></div>`;
         });
         html += `</div></div>`;
       }
@@ -134,13 +170,45 @@ const App = {
     }
   },
 
-  _loadCommands() {
-    const params = {};
+  _loadHistoryTranscript(event, runId) {
+    event.stopPropagation();
+    const container = document.getElementById('ht-' + runId);
+    if (!container) return;
+
+    const wasHidden = container.style.display === 'none';
+    document.querySelectorAll('.transcript-inline').forEach(el => el.style.display = 'none');
+    if (wasHidden) {
+      container.style.display = 'block';
+      if (typeof TranscriptViewer !== 'undefined') {
+        TranscriptViewer.load(container, runId);
+      }
+    }
+  },
+
+  async _loadCommands() {
+    const params = { page: this._cmdPage, per_page: this._cmdPerPage };
     const runId = document.getElementById('cmdRunIdFilter').value.trim();
     const status = document.getElementById('cmdStatusFilter').value;
     if (runId) params.run_id = runId;
     if (status) params.status = status;
-    CommandLog.load(params);
+
+    const result = await CommandLog.load(params);
+    this._renderCmdPagination(result.totalPages, result.page);
+  },
+
+  _renderCmdPagination(totalPages, currentPage) {
+    const pg = document.getElementById('cmdPagination');
+    if (totalPages <= 1) { pg.innerHTML = ''; return; }
+    pg.innerHTML = `
+      <span class="pg-info">Page ${currentPage} / ${totalPages}</span>
+      <button class="btn btn-sm" ${currentPage <= 1 ? 'disabled' : ''} onclick="App._goCmdPage(${currentPage - 1})">◀ Prev</button>
+      <button class="btn btn-sm" ${currentPage >= totalPages ? 'disabled' : ''} onclick="App._goCmdPage(${currentPage + 1})">Next ▶</button>
+    `;
+  },
+
+  _goCmdPage(p) {
+    this._cmdPage = p;
+    this._loadCommands();
   },
 
   reloadCurrentView() {

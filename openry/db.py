@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS commands_log (
 
 CREATE INDEX IF NOT EXISTS idx_commands_run_id ON commands_log(run_id);
 CREATE INDEX IF NOT EXISTS idx_commands_timestamp ON commands_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_commands_exit_code ON commands_log(exit_code);
 
 CREATE TABLE IF NOT EXISTS task_state (
     run_id      TEXT PRIMARY KEY,

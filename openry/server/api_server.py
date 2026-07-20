@@ -86,26 +86,50 @@ def _api_list_compositions(handler, query: dict) -> None:
     conn = _get_conn()
     conn.row_factory = None
     status_filter = query.get("status", [None])[0]
-    limit = min(int(query.get("limit", ["20"])[0]), 200)
-    offset = int(query.get("offset", ["0"])[0])
 
-    rows = conn.execute(
-        "SELECT id, composition, status, current_big_step, big_step_started_at, "
-        "timeout_minutes, created_at, updated_at "
-        "FROM workflow_instances ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        (limit, offset),
-    ).fetchall()
+    # Pagination: page (1-based) + per_page, or raw limit/offset for backward compat
+    page = int(query.get("page", ["1"])[0])
+    per_page = int(query.get("per_page", ["10"])[0])
+    per_page = min(max(per_page, 1), 100)
 
+    if "limit" in query or "offset" in query:
+        # Raw mode (backward compat)
+        limit = min(int(query.get("limit", ["20"])[0]), 200)
+        offset = int(query.get("offset", ["0"])[0])
+    else:
+        # Page mode
+        limit = per_page
+        offset = (page - 1) * per_page
+
+    # Total count for pagination
     if status_filter:
-        rows = [r for r in rows if r[2] == status_filter]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM workflow_instances WHERE status = ?", (status_filter,)
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, composition, status, current_big_step, big_step_started_at, "
+            "timeout_minutes, created_at, updated_at "
+            "FROM workflow_instances WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (status_filter, limit, offset),
+        ).fetchall()
+    else:
+        total = conn.execute("SELECT COUNT(*) FROM workflow_instances").fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, composition, status, current_big_step, big_step_started_at, "
+            "timeout_minutes, created_at, updated_at "
+            "FROM workflow_instances ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
 
-    total = conn.execute("SELECT COUNT(*) FROM workflow_instances").fetchone()[0]
     cols = ["id", "composition", "status", "current_big_step",
             "big_step_started_at", "timeout_minutes", "created_at", "updated_at"]
     conn.close()
     _send_json(handler, {
         "compositions": [dict(zip(cols, r)) for r in rows],
         "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": max(1, (total + per_page - 1) // per_page),
     })
 
 
@@ -169,7 +193,19 @@ def _api_list_commands(handler, query: dict) -> None:
     conn.row_factory = None
     run_id = query.get("run_id", [None])[0]
     status = query.get("status", [None])[0]
-    limit = min(int(query.get("limit", ["50"])[0]), 500)
+
+    # Pagination
+    page = int(query.get("page", ["1"])[0])
+    per_page = int(query.get("per_page", ["20"])[0])
+    per_page = min(max(per_page, 1), 100)
+
+    # Backward compat: raw limit/offset override
+    if "limit" in query:
+        limit = min(int(query.get("limit", ["50"])[0]), 500)
+        offset = int(query.get("offset", ["0"])[0])
+    else:
+        limit = per_page
+        offset = (page - 1) * per_page
 
     where = []
     params = []
@@ -180,20 +216,32 @@ def _api_list_commands(handler, query: dict) -> None:
         if status == "success":
             where.append("exit_code = 0")
         elif status == "failed":
-            where.append("exit_code != 0")
+            where.append("exit_code > 0")
     where_clause = ("WHERE " + " AND ".join(where)) if where else ""
-    params.append(limit)
 
+    # Total count
+    count_params = params[:]  # copy before adding limit/offset
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM commands_log {where_clause}", count_params
+    ).fetchone()[0]
+
+    params.extend([limit, offset])
     rows = conn.execute(
         f"SELECT id, run_id, workflow, step_id, command, shell, cwd, "
         f"exit_code, stdout, stderr, duration_ms, timeout, timestamp "
-        f"FROM commands_log {where_clause} ORDER BY id DESC LIMIT ?",
+        f"FROM commands_log {where_clause} ORDER BY id DESC LIMIT ? OFFSET ?",
         params,
     ).fetchall()
     cols = ["id", "run_id", "workflow", "step_id", "command", "shell", "cwd",
             "exit_code", "stdout", "stderr", "duration_ms", "timeout", "timestamp"]
     conn.close()
-    _send_json(handler, {"commands": [dict(zip(cols, r)) for r in rows]})
+    _send_json(handler, {
+        "commands": [dict(zip(cols, r)) for r in rows],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": max(1, (total + per_page - 1) // per_page),
+    })
 
 
 def _api_list_workflows(handler) -> None:

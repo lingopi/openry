@@ -7,10 +7,12 @@ const CommandLog = {
     container.innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
 
     try {
-      const data = await API.getCommands({ limit: 50, ...params });
+      const data = await API.getCommands(params);
       this._render(data.commands || []);
+      return { total: data.total || 0, totalPages: data.total_pages || 1, page: data.page || 1 };
     } catch (e) {
       container.innerHTML = `<div class="empty-state"><p>⚠️ ${e.message}</p></div>`;
+      return { total: 0, totalPages: 1, page: 1 };
     }
   },
 
@@ -25,7 +27,7 @@ const CommandLog = {
       const exitOk = cmd.exit_code === 0;
       return `<div class="command-item">
         <div class="command-item-header" onclick="this.parentElement.classList.toggle('expanded')">
-          <span class="command-index">#${commands.length - i}</span>
+          <span class="command-index">#${cmd.id}</span>
           <span class="command-cmd">${this._esc(cmd.command)}</span>
           <span class="command-exit ${exitOk ? 'success' : 'failed'}">${exitOk ? '✅' : '❌'} ${cmd.exit_code}</span>
           <span class="command-duration">${cmd.duration_ms}ms</span>
