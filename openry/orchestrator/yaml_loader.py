@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,12 +10,18 @@ import yaml
 
 
 def _find_config_dir() -> Path:
-    """Find the .openry config directory from current working directory."""
-    cwd = Path.cwd()
-    config_dir = cwd / ".openry"
+    """Find the .openry config directory.
+
+    Priority: OPENRY_HOME env var > ~/.openry (default)
+    """
+    if env_home := os.environ.get("OPENRY_HOME"):
+        config_dir = Path(env_home)
+    else:
+        config_dir = Path.home() / ".openry"
     if not config_dir.exists():
         raise FileNotFoundError(
-            f".openry/ directory not found. Run 'openry' first to initialize."
+            f".openry/ directory not found at {config_dir}. "
+            "Run 'openry' first to initialize, or set OPENRY_HOME."
         )
     return config_dir
 

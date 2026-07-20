@@ -30,12 +30,12 @@ DEFAULTS: dict[str, Any] = {
 def _get_openry_dir() -> Path:
     """Locate or create the .openry directory.
 
-    Priority: OPENRY_HOME env var > current working directory .openry
+    Priority: OPENRY_HOME env var > ~/.openry (default)
     """
     if env_home := os.environ.get("OPENRY_HOME"):
         p = Path(env_home)
     else:
-        p = Path.cwd() / ".openry"
+        p = Path.home() / ".openry"
     p.mkdir(parents=True, exist_ok=True)
     return p
 

@@ -1,16 +1,65 @@
-#!/bin/bash
-# OpenRY one-click installer
-# Detects Python environment and installs openry to PATH
-set -e
+#!/usr/bin/env bash
+# ============================================================================
+# OpenRY — One-Click Cross-Platform Installer
+# ============================================================================
+# Platforms:
+#   macOS   ✅  (primary, tested on Apple Silicon + Intel)
+#   Linux   ✅  (supported)
+#   Windows ❌  (install.ps1 planned — see manual instructions below)
+#
+# Windows users — install manually for now:
+#   1. Install Python 3.9+:  winget install Python.Python.3.12
+#   2. cd openry && pip install -e .
+#   3. set OPENRY_HOME=%USERPROFILE%\.openry
+#
+# License: MIT — OpenRY Contributors
+# ============================================================================
+set -euo pipefail
 
+# ── Colors ────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
 
-echo -e "${GREEN}=== OpenRY Installer ===${NC}"
+echo ""
+echo -e "${GREEN}${BOLD}╔══════════════════════════════════════╗${NC}"
+echo -e "${GREEN}${BOLD}║       OpenRY — One-Click Installer  ║${NC}"
+echo -e "${GREEN}${BOLD}╚══════════════════════════════════════╝${NC}"
+echo ""
 
-# --- 1. Find Python ---
+# ── 1. OS Detection ──────────────────────────────────────────────────────
+
+OS="$(uname -s)"
+case "$OS" in
+    Darwin)  OS_NAME="macOS" ;;
+    Linux)   OS_NAME="Linux" ;;
+    *)
+        echo -e "${RED}✗ Unsupported OS: $OS${NC}"
+        echo ""
+        echo "OpenRY currently supports macOS and Linux."
+        echo "Windows support is planned — for now, install manually:"
+        echo "  1. Install Python 3.9+:  winget install Python.Python.3.12"
+        echo "  2. cd openry && pip install -e ."
+        echo "  3. set OPENRY_HOME=%USERPROFILE%\\.openry"
+        exit 1
+        ;;
+esac
+echo -e "  Detected OS: ${CYAN}$OS_NAME${NC}"
+
+# ── 2. Resolve paths ─────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WRAPPER_BIN="${HOME}/.local/bin"
+OPENRY_HOME="${OPENRY_HOME:-$HOME/.openry}"
+
+echo -e "  Install dir: ${CYAN}$SCRIPT_DIR${NC}"
+echo ""
+
+# ── 3. Python Detection ───────────────────────────────────────────────────
+
 PYTHON=""
 for candidate in python3.12 python3.11 python3.10 python3.9 python3; do
     if command -v "$candidate" &>/dev/null; then
@@ -20,73 +69,218 @@ for candidate in python3.12 python3.11 python3.10 python3.9 python3; do
 done
 
 if [ -z "$PYTHON" ]; then
-    echo -e "${RED}Error: Python 3 not found.${NC}"
-    echo "Install via one of:"
+    echo -e "${RED}✗ Python 3.9+ not found.${NC}"
+    echo ""
+    echo "Install Python 3 first:"
     echo "  macOS:  brew install python@3.12"
-    echo "  Linux:  sudo apt install python3  (or your distro's package manager)"
-    echo "  Windows: winget install Python.Python.3.12"
+    echo "  Linux:  sudo apt install python3"
     exit 1
 fi
 
 PY_VER=$($PYTHON --version 2>&1)
-echo -e "Using: ${GREEN}$PY_VER${NC}"
+echo -e "  ${GREEN}✓${NC} Python: $PY_VER"
 
-# --- 2. Install pyyaml ---
-echo "Installing pyyaml..."
+# ── 4. pip Detection ──────────────────────────────────────────────────────
+
+if ! $PYTHON -m pip --version &>/dev/null; then
+    echo -e "${RED}✗ pip not available for $PYTHON${NC}"
+    echo "  macOS:  $PYTHON -m ensurepip --upgrade"
+    echo "  Linux:  sudo apt install python3-pip"
+    exit 1
+fi
+
+# ── 5. Install pyyaml dependency ──────────────────────────────────────────
+
+echo -e "  Installing pyyaml..."
 $PYTHON -m pip install pyyaml --quiet 2>/dev/null || {
-    echo -e "${YELLOW}pip install pyyaml failed, continuing anyway...${NC}"
+    echo -e "  ${YELLOW}⚠ pyyaml install failed (non-fatal, continuing...)${NC}"
 }
 
-# --- 3. Try pip install ---
+# ── 6. Install openry CLI ─────────────────────────────────────────────────
+
+echo -e "  Installing openry CLI..."
 PIP_OK=false
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-if $PYTHON -m pip install -e . --quiet 2>/dev/null; then
+# Strategy A: pip install --user (puts openry in ~/.local/bin, no sudo)
+if $PYTHON -m pip install --user -e . --quiet 2>/dev/null; then
+    mkdir -p "$WRAPPER_BIN"
+    export PATH="$WRAPPER_BIN:$PATH"
+
     if command -v openry &>/dev/null; then
-        echo -e "${GREEN}✓ Installed via pip (editable mode)${NC}"
         PIP_OK=true
+    else
+        # pip may have put it in ~/Library/Python/3.x/bin (macOS default)
+        OPENRY_PATH=$($PYTHON -c "import shutil; print(shutil.which('openry') or '')" 2>/dev/null || true)
+        if [ -n "$OPENRY_PATH" ] && [ -x "$OPENRY_PATH" ]; then
+            PIP_OK=true
+        fi
     fi
 fi
 
-# --- 4. Fallback: wrapper script ---
+# Strategy B: fallback — create a wrapper script
 if [ "$PIP_OK" = false ]; then
-    WRAPPER_DIR="${HOME}/.local/bin"
-    mkdir -p "$WRAPPER_DIR"
+    mkdir -p "$WRAPPER_BIN"
 
-    cat > "$WRAPPER_DIR/openry" << WRAPPER
-#!/bin/bash
+    cat > "$WRAPPER_BIN/openry" << WRAPPER
+#!/usr/bin/env bash
 # Auto-generated by OpenRY installer
-OPENRY_HOME="\${OPENRY_HOME:-$SCRIPT_DIR}"
-cd "\$OPENRY_HOME" && PYTHONPATH="\$OPENRY_HOME" $PYTHON -m openry "\$@"
+OPENRY_HOME="\${OPENRY_HOME:-$OPENRY_HOME}"
+PYTHONPATH="$SCRIPT_DIR:\$PYTHONPATH" exec $PYTHON -m openry "\$@"
 WRAPPER
-    chmod +x "$WRAPPER_DIR/openry"
-
-    echo -e "${GREEN}✓ Wrapper installed to ${WRAPPER_DIR}/openry${NC}"
-
-    # Add to PATH if not already
-    if [[ ":$PATH:" != *":$WRAPPER_DIR:"* ]]; then
-        SHELL_RC=""
-        case "$SHELL" in
-            */zsh)  SHELL_RC="$HOME/.zshrc" ;;
-            */bash) SHELL_RC="$HOME/.bashrc" ;;
-            *)      SHELL_RC="$HOME/.profile" ;;
-        esac
-        echo "export PATH=\"$WRAPPER_DIR:\$PATH\"" >> "$SHELL_RC"
-        echo -e "${YELLOW}  Added to PATH in $SHELL_RC — restart your shell or run:${NC}"
-        echo "  source $SHELL_RC"
-    fi
-fi
-
-# --- 5. Verify ---
-export PATH="$HOME/.local/bin:$PATH"
-echo ""
-if openry -c 'echo "install OK"' 2>/dev/null | grep -q "install OK"; then
-    echo -e "${GREEN}✓ openry is ready!${NC}"
-    echo ""
-    echo "  Quick test:  openry -c 'echo hello'"
-    echo "  With env:    OPENRY_RUN_ID=xxx openry --status completed"
+    chmod +x "$WRAPPER_BIN/openry"
+    export PATH="$WRAPPER_BIN:$PATH"
+    echo -e "  ${YELLOW}⚠ Using wrapper at ${WRAPPER_BIN}/openry${NC}"
 else
-    echo -e "${RED}✗ Verification failed. Try manually:${NC}"
-    echo "  cd $SCRIPT_DIR && PYTHONPATH=. $PYTHON -m openry -c 'echo test'"
+    echo -e "  ${GREEN}✓${NC} openry installed via pip"
 fi
+
+# ── 7. Ensure ~/.local/bin in shell PATH ─────────────────────────────────
+
+SHELL_RC=""
+case "${SHELL##*/}" in
+    zsh)  SHELL_RC="$HOME/.zshrc" ;;
+    bash) SHELL_RC="${HOME}/.bashrc" ;;
+    *)    SHELL_RC="${HOME}/.profile" ;;
+esac
+
+if [ -f "$SHELL_RC" ] && grep -qF "$WRAPPER_BIN" "$SHELL_RC" 2>/dev/null; then
+    : # already configured
+else
+    {
+        echo ""
+        echo "# Added by OpenRY installer"
+        echo "export OPENRY_HOME=\"${OPENRY_HOME}\""
+        echo "export PATH=\"$WRAPPER_BIN:\$PATH\""
+    } >> "$SHELL_RC"
+    echo -e "  ${YELLOW}⚠ Added ${WRAPPER_BIN} + OPENRY_HOME to ${SHELL_RC}${NC}"
+    echo "    Restart your terminal or run: source $SHELL_RC"
+fi
+
+# ── 8. Initialize .openry/ ───────────────────────────────────────────────
+
+mkdir -p "$OPENRY_HOME/workflows"
+mkdir -p "$OPENRY_HOME/compositions"
+echo -e "  ${GREEN}✓${NC} Initialized ${CYAN}${OPENRY_HOME}${NC} (workflows/ + compositions/)"
+echo ""
+
+# ── 9. Verify ────────────────────────────────────────────────────────────
+
+echo -e "  Verifying openry..."
+if openry -c 'echo "install OK"' 2>/dev/null | grep -q "install OK"; then
+    OPENRY_BIN=$(which openry 2>/dev/null || echo "$WRAPPER_BIN/openry")
+    echo -e "  ${GREEN}✓ openry is ready${NC}  (${CYAN}${OPENRY_BIN}${NC})"
+else
+    echo -e "  ${RED}✗ Verification failed${NC}"
+    echo "  Try: cd $SCRIPT_DIR && PYTHONPATH=. $PYTHON -m openry -c 'echo test'"
+    exit 1
+fi
+echo ""
+
+# ── 10. orchestrator-plugin (conditional) ─────────────────────────────────
+
+PLUGIN_DIR="${SCRIPT_DIR}/orchestrator-plugin"
+if [ -d "$PLUGIN_DIR" ]; then
+    echo -e "${BOLD}── Orchestrator Plugin (OpenClaw integration) ──${NC}"
+    echo ""
+
+    MISSING_DEPS=""
+    command -v openclaw &>/dev/null || MISSING_DEPS="${MISSING_DEPS}  - OpenClaw not found (install: https://openclaw.ai)\n"
+    command -v node &>/dev/null || MISSING_DEPS="${MISSING_DEPS}  - Node.js not found (install: https://nodejs.org)\n"
+    command -v npm &>/dev/null || MISSING_DEPS="${MISSING_DEPS}  - npm not found (bundled with Node.js)\n"
+
+    if [ -n "$MISSING_DEPS" ]; then
+        echo -e "  ${YELLOW}⚠ Skipping orchestrator plugin:${NC}"
+        echo -e "$MISSING_DEPS"
+        echo "  Re-run this installer after installing the missing dependencies."
+    else
+        echo -e "  ${GREEN}✓${NC} OpenClaw + Node.js detected, installing plugin..."
+        PLUGIN_OK=true
+
+        cd "$PLUGIN_DIR"
+
+        npm install --silent 2>/dev/null || {
+            echo -e "  ${YELLOW}⚠ npm install failed, skipping plugin${NC}"
+            PLUGIN_OK=false
+        }
+
+        if $PLUGIN_OK; then
+            npm run build --silent 2>/dev/null || {
+                echo -e "  ${YELLOW}⚠ build failed, skipping plugin${NC}"
+                PLUGIN_OK=false
+            }
+        fi
+
+        if $PLUGIN_OK; then
+            openclaw plugins install . --link 2>/dev/null || {
+                echo -e "  ${YELLOW}⚠ openclaw plugins install failed${NC}"
+                echo "    Try: cd $PLUGIN_DIR && openclaw plugins install . --link"
+                PLUGIN_OK=false
+            }
+        fi
+
+        if $PLUGIN_OK; then
+            # Create agent workspace + AGENTS.md
+            AGENT_WS="${OPENRY_HOME}/agent-workspace"
+            mkdir -p "$AGENT_WS"
+
+            cat > "$AGENT_WS/AGENTS.md" << 'AGENTPROMPT'
+# OpenRY Worker Agent
+
+You are an AI agent executing sub-steps of an OpenRY workflow.
+You have exactly TWO tools available:
+
+## Tools
+
+### openry_run
+Execute shell commands. Call this for ALL shell operations.
+
+### openry_status
+Declare the sub-step is complete. Call this ONLY when the task is fully done.
+
+## Rules
+
+1. Read the task description carefully — it tells you what to do
+2. Use `openry_run` for every shell command you need to run
+3. When the ENTIRE task is complete, call `openry_status` ONCE:
+   - `status: "completed"` — task succeeded, include all required data in `payload`
+   - `status: "failed"` — task cannot be completed
+4. Do NOT use `openry_run` to call the `openry` CLI directly — that's what `openry_status` tool is for
+5. Do NOT ask for confirmation — just execute
+6. Keep responses brief
+AGENTPROMPT
+
+            echo -e "  ${GREEN}✓${NC} Plugin installed + workspace created"
+            echo ""
+            echo -e "  ${YELLOW}${BOLD}⚠ Add this to ~/.openclaw/openclaw.json:${NC}"
+            echo ""
+            echo '  "agents": {'
+            echo '    "list": [{'
+            echo '      "id": "openry-worker",'
+            echo '      "name": "OpenRY Worker",'
+            echo '      "tools": { "profile": "minimal", "alsoAllow": ["openry_run", "openry_status"] },'
+            echo "      \"workspace\": \"$AGENT_WS\""
+            echo '    }]'
+            echo '  }'
+            echo ""
+            echo -e "  Then restart:  ${CYAN}openclaw gateway restart${NC}"
+        fi
+
+        cd "$SCRIPT_DIR"
+    fi
+    echo ""
+fi
+
+# ── 11. Done ──────────────────────────────────────────────────────────────
+
+echo -e "${GREEN}${BOLD}╔══════════════════════════════════════╗${NC}"
+echo -e "${GREEN}${BOLD}║     OpenRY installation complete!    ║${NC}"
+echo -e "${GREEN}${BOLD}╚══════════════════════════════════════╝${NC}"
+echo ""
+echo "  Quick test:"
+echo "    openry -c 'echo hello'"
+echo ""
+echo "  Workflows:    ${OPENRY_HOME}/workflows/"
+echo "  Compositions: ${OPENRY_HOME}/compositions/"
+echo "  Database:     ${OPENRY_HOME}/openry.db  (auto-created on first use)"
+echo ""
