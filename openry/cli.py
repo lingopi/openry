@@ -306,13 +306,30 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    """Main entry point for the openry CLI."""
+    """Main entry point for the openry CLI.
+
+    Usage:
+        openry -c "command"           # Execute a command (backward compatible)
+        openry --status completed      # Update task status (backward compatible)
+        openry serve [--port PORT]     # Start the dashboard API server
+    """
+    # Route 'serve' subcommand early to avoid breaking backward compat
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        serve_parser = argparse.ArgumentParser(prog="openry serve", description="Start the dashboard API server")
+        serve_parser.add_argument("--host", type=str, default="127.0.0.1", help="Bind host")
+        serve_parser.add_argument("--port", type=int, default=9100, help="Bind port")
+        serve_parser.add_argument("--dev", action="store_true", help="Development mode")
+        serve_args = serve_parser.parse_args(sys.argv[2:])
+        from .server import run_server
+        run_server(serve_args.host, serve_args.port)
+        return
+
+    # Default mode: -c or --status (Phase 1/2 backward compatible)
     parser = argparse.ArgumentParser(
         prog="openry",
         description="Command forwarder for ReAct Agent workflow systems",
     )
 
-    # Mutually exclusive: -c or --status
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "-c", "--command",
@@ -360,7 +377,6 @@ def main() -> None:
     elif args.status is not None:
         cmd_status(args)
     else:
-        # argparse mutually exclusive group should prevent this, but safety net
         print(json.dumps({"error": "either --command or --status is required"}))
         sys.exit(1)
 

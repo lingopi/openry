@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenRY Dashboard</title>
+<link rel="stylesheet" href="/css/dashboard.css">
+</head>
+<body>
+
+<!-- ── Top Navigation ────────────────────────────── -->
+<nav class="top-nav">
+  <div class="nav-brand">
+    <span class="logo">⚡</span>
+    <span class="brand-text">OpenRY</span>
+  </div>
+  <div class="nav-tabs" id="navTabs">
+    <button class="nav-tab active" data-view="workflows">Workflows</button>
+    <button class="nav-tab" data-view="history">运行历史</button>
+    <button class="nav-tab" data-view="commands">命令历史</button>
+    <button class="nav-tab" data-view="metrics">Metrics</button>
+  </div>
+  <div class="nav-status">
+    <span class="status-dot" id="connectionDot" title="API connection"></span>
+    <span class="status-text" id="connectionText">connected</span>
+  </div>
+</nav>
+
+<!-- ── Main Content ──────────────────────────────── -->
+<main id="mainContent">
+
+  <!-- Workflows View -->
+  <section class="view active" id="view-workflows">
+    <div class="three-col-layout">
+      <aside class="sidebar" id="workflowSidebar">
+        <div class="sidebar-header">
+          <h2>Workflows</h2>
+          <button class="btn btn-sm btn-primary" id="btnRefreshWorkflows" title="Refresh">⟳</button>
+        </div>
+        <div class="sidebar-list" id="workflowList">
+          <div class="empty-state">Loading...</div>
+        </div>
+      </aside>
+      <div class="detail-panel" id="workflowDetail">
+        <div class="empty-state">
+          <div class="empty-icon">📋</div>
+          <p>选择一个 workflow 查看详情</p>
+        </div>
+      </div>
+      <div class="transcript-panel" id="transcriptPanel">
+        <div class="panel-header">
+          <h2>📝 Session Transcript</h2>
+        </div>
+        <div class="transcript-content" id="transcriptContent">
+          <div class="empty-state">
+            <div class="empty-icon">💬</div>
+            <p>点击一个 step 查看对话记录</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- History View -->
+  <section class="view" id="view-history">
+    <div class="panel-header">
+      <h2>运行历史</h2>
+      <div class="filter-bar">
+        <select id="historyStatusFilter">
+          <option value="">全部状态</option>
+          <option value="running">🔄 运行中</option>
+          <option value="completed">✅ 已完成</option>
+          <option value="failed">❌ 失败</option>
+        </select>
+      </div>
+    </div>
+    <div class="table-container">
+      <table class="data-table" id="historyTable">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Workflow</th>
+            <th>状态</th>
+            <th>当前步骤</th>
+            <th>开始时间</th>
+          </tr>
+        </thead>
+        <tbody id="historyBody">
+          <tr><td colspan="5" class="empty-cell">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <!-- History detail panel -->
+    <div class="detail-panel hidden" id="historyDetail"></div>
+  </section>
+
+  <!-- Commands View -->
+  <section class="view" id="view-commands">
+    <div class="panel-header">
+      <h2>命令历史</h2>
+      <div class="filter-bar">
+        <input type="text" id="cmdRunIdFilter" placeholder="Run ID..." class="input-sm">
+        <select id="cmdStatusFilter">
+          <option value="">全部</option>
+          <option value="success">✅ 成功</option>
+          <option value="failed">❌ 失败</option>
+        </select>
+        <button class="btn btn-sm btn-primary" id="btnRefreshCommands">⟳ 刷新</button>
+      </div>
+    </div>
+    <div class="command-list" id="commandList">
+      <div class="empty-state">Loading...</div>
+    </div>
+  </section>
+
+  <!-- Metrics View -->
+  <section class="view" id="view-metrics">
+    <div class="metrics-grid" id="metricsGrid">
+      <div class="empty-state">Loading...</div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ── Trigger Modal ─────────────────────────────── -->
+<div class="modal-overlay hidden" id="triggerModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>▶ 触发 Workflow</h3>
+      <button class="btn-close" id="btnCloseModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <label for="triggerWorkflow">Workflow / Composition</label>
+      <select id="triggerWorkflow"></select>
+      <label for="triggerPayload">Initial Payload (JSON)</label>
+      <textarea id="triggerPayload" rows="8" spellcheck="false">{
+  "example_key": "example_value"
+}</textarea>
+      <div id="triggerError" class="error-msg hidden"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="btnCancelTrigger">取消</button>
+      <button class="btn btn-primary" id="btnRunTrigger">▶ Run</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Floating trigger button ───────────────────── -->
+<button class="fab" id="fabTrigger" title="触发 Workflow">▶</button>
+
+<!-- ── Scripts ───────────────────────────────────── -->
+<script src="/js/api.js"></script>
+<script src="/js/components/workflow-tree.js"></script>
+<script src="/js/components/command-log.js"></script>
+<script src="/js/components/payload-viewer.js"></script>
+<script src="/js/components/trigger-panel.js"></script>
+<script src="/js/components/metrics-cards.js"></script>
+<script src="/js/components/transcript-viewer.js"></script>
+<script src="/js/app.js"></script>
+
+</body>
+</html>
