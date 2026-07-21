@@ -173,22 +173,27 @@ def _check_output_overflow(run_id: str, stdout: str) -> tuple[str, bool]:
 def _terminate_session(session_key: str) -> None:
     """Best-effort terminate the agent session via openclaw gateway call.
 
-    This is non-blocking and failures are silently ignored — the patrol
-    loop will eventually kill the process via SIGTERM/SIGKILL anyway.
+    Blocks up to 8s waiting for termination to complete before returning.
+    Failures are non-fatal — the patrol loop will eventually SIGTERM/SIGKILL.
     """
     if not session_key:
         return
     try:
         import subprocess as _subprocess
-        _subprocess.Popen(
+        params = json.dumps({"sessionKey": session_key})
+        proc = _subprocess.Popen(
             ["openclaw", "gateway", "call", "chat.abort",
-             "--params", json.dumps({"sessionKey": session_key}),
+             "--params", params,
              "--timeout", "5000"],
             stdout=_subprocess.DEVNULL,
             stderr=_subprocess.DEVNULL,
         )
+        try:
+            proc.communicate(timeout=8)
+        except _subprocess.TimeoutExpired:
+            proc.kill()
     except Exception:
-        pass  # Best-effort: patrol loop will hard-kill if needed
+        pass
 
 
 # ──────────────────────────────────────────────
