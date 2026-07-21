@@ -98,3 +98,17 @@ def list_available_compositions() -> list[str]:
     return sorted(
         p.stem for p in comp_dir.glob("*.yaml")
     )
+
+
+# ── Phase 3a: validation_routing helpers ─────────────────────
+
+
+def has_validation_routing(step_config: dict[str, Any]) -> bool:
+    """Check if a sub_step config uses Phase 3a conditional routing."""
+    entries = step_config.get("validation_routing")
+    return bool(entries)
+
+
+def get_validation_routing_entries(step_config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract validation_routing entries from sub_step config."""
+    return step_config.get("validation_routing", [])

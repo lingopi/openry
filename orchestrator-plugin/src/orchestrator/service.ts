@@ -8,7 +8,6 @@ import type { OpenClawPluginServiceContext } from "openclaw/plugin-sdk/plugin-en
 import { openDb, getDbPath } from "./db-client.js";
 import { PatrolLoop, type PatrolConfig } from "./patrol.js";
 import { setConfigDir } from "./yaml-loader.js";
-
 function resolveOpenryDir(ctx: OpenClawPluginServiceContext): string {
   // 1. OPENRY_HOME env var (explicit override)
   if (process.env.OPENRY_HOME) return process.env.OPENRY_HOME;
@@ -44,18 +43,18 @@ export function createOrchestratorService() {
         // Resolve openclaw path (might not be in Gateway's minimal PATH)
         const openclawPath = process.env.OPENCLAW_BIN || "openclaw";
 
+        // Start patrol in CLI mode immediately — don't block Gateway startup
         const config: PatrolConfig = {
           maxWorkers: 3,
           patrolIntervalMs: 5000,
-          zombieTimeoutMinutes: 30,
+          zombieTimeoutMinutes: 10,
           graceShutdownSeconds: 10,
           openclawPath,
           agentId: "openry-worker",
         };
-
         patrol = new PatrolLoop(db, config);
         patrol.start();
-        console.log("[orchestrator-plugin] Patrol STARTED (workers=" + config.maxWorkers + ")");
+        console.log("[orchestrator-plugin] Patrol STARTED (CLI spawn mode)");
       } catch (err) {
         console.log("[orchestrator-plugin] start FAILED:", err);
       }

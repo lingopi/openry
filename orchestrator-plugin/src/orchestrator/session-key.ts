@@ -33,6 +33,9 @@ export function buildSessionKey(
   workflow: string,
   stepId: string,
   runId: string,
+  agentId?: string,
 ): string {
-  return `openry:wf:${workflow}:step:${stepId}:run:${runId}`;
+  const suffix = `openry:wf:${workflow}:step:${stepId}:run:${runId}`;
+  // Include agent prefix so Gateway validates agentId correctly
+  return agentId ? `agent:${agentId}:${suffix}` : suffix;
 }

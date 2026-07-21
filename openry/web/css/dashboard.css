@@ -142,6 +142,7 @@ body {
 /* Status colors */
 .status-done { color: var(--green); }
 .status-failed { color: var(--red); }
+.status-dropped { color: var(--red); }
 .status-running { color: var(--accent); }
 .status-pending { color: var(--text-muted); }
 .status-overflow { color: var(--purple); }

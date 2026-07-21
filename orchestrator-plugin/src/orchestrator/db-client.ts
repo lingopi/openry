@@ -226,6 +226,18 @@ export function enqueueNextSubStep(
   );
 }
 
+export function getCommandsHistory(
+  db: Database.Database,
+  runId: string,
+): Array<Record<string, unknown>> {
+  return db
+    .prepare(
+      `SELECT command, exit_code, stdout, stderr, duration_ms, timestamp
+       FROM commands_log WHERE run_id = ? ORDER BY id ASC`,
+    )
+    .all(runId) as Array<Record<string, unknown>>;
+}
+
 export function updateWorkflowInstanceCurrentStep(
   db: Database.Database,
   workflowInstanceId: number,
@@ -236,4 +248,57 @@ export function updateWorkflowInstanceCurrentStep(
      SET current_big_step = ?, updated_at = datetime('now')
      WHERE id = ?`,
   ).run(bigStepRef, workflowInstanceId);
+}
+
+export function updateWorkflowInstanceStatus(
+  db: Database.Database,
+  workflowInstanceId: number,
+  status: string,
+): void {
+  db.prepare(
+    `UPDATE workflow_instances
+     SET status = ?, updated_at = datetime('now')
+     WHERE id = ?`,
+  ).run(status, workflowInstanceId);
+}
+
+// ── Phase 3a: retry with budget ────────────────────────────────
+
+export function retryOrFail(
+  db: Database.Database,
+  runId: string,
+  maxRetries: number,
+  reason: string,
+): { retried: boolean; exhausted: boolean } {
+  const row = db
+    .prepare("SELECT sub_step_retry_count FROM task_state WHERE run_id = ?")
+    .get(runId) as { sub_step_retry_count: number } | undefined;
+
+  const retryCount = row?.sub_step_retry_count ?? 0;
+
+  if (retryCount >= maxRetries) {
+    // Budget exhausted → permanently failed
+    db.prepare(
+      `UPDATE task_state
+       SET status = 'failed', validation_status = 'failed', updated_at = datetime('now')
+       WHERE run_id = ?`,
+    ).run(runId);
+    console.log(
+      `[orchestrator-plugin] Phase 3a: ${runId} retry budget exhausted (${retryCount}/${maxRetries}): ${reason}`,
+    );
+    return { retried: false, exhausted: true };
+  }
+
+  // Retry: increment counter and re-enqueue
+  const newCount = retryCount + 1;
+  db.prepare(
+    `UPDATE task_state
+     SET status = 'queued', validation_status = 'failed',
+         sub_step_retry_count = ?, updated_at = datetime('now')
+     WHERE run_id = ?`,
+  ).run(newCount, runId);
+  console.log(
+    `[orchestrator-plugin] Phase 3a: ${runId} retry ${newCount}/${maxRetries}: ${reason}`,
+  );
+  return { retried: true, exhausted: false };
 }

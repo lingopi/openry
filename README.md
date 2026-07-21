@@ -6,12 +6,16 @@
 
 Agent thinks. OpenRY acts. Orchestrator orchestrates.
 
-## Core Features (Phase 1)
+## Core Features (Phase 1-3)
 
 - **Command Forwarding**: `openry -c '<shell command>'` — cross-platform execution with automatic shell selection
-- **Status Updates**: `openry --status completed/failed` — agent explicitly declares completion
+- **Status Updates**: `openry --status completed/failed/cancelled/overflow` — agent declares completion with sync validation & retry
 - **Payload Passing**: `--payload '{"key":"val"}'` — data handoff between workflow steps
-- **Transparent Audit**: all calls automatically recorded to SQLite, invisible to the agent
+- **State Machine Guard**: only `in_progress` tasks accept agent actions; terminal states are locked
+- **Sync Retry/Validation**: retry logic & payload validation run synchronously in `--status`, not in a background loop
+- **Transparent Audit**: all calls automatically recorded to SQLite
+- **OpenClaw Plugin**: TypeScript orchestrator as an OpenClaw Gateway plugin (`orchestrator-plugin/`)
+- **Workflow YAML**: compose big_steps & sub_steps with validation rules, retry budgets, overflow handling
 
 ## Why OpenRY
 

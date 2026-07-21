@@ -299,7 +299,7 @@ const WorkflowTree = {
   _statusIcon(status) {
     switch (status) {
       case 'completed': case 'validated': case 'done': return '✅';
-      case 'failed': case 'cancelled': return '❌';
+      case 'failed': case 'cancelled': case 'dropped': return '❌';
       case 'in_progress': case 'running': return '🔄';
       case 'overflow': return '🟣';
       default: return '⏳';
@@ -309,7 +309,7 @@ const WorkflowTree = {
   _statusColor(status) {
     switch (status) {
       case 'completed': case 'validated': case 'done': return 'var(--green)';
-      case 'failed': case 'cancelled': return 'var(--red)';
+      case 'failed': case 'cancelled': case 'dropped': return 'var(--red)';
       case 'in_progress': case 'running': return 'var(--accent)';
       case 'overflow': return 'var(--purple)';
       default: return 'var(--text-muted)';

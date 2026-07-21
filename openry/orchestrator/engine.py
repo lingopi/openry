@@ -17,7 +17,6 @@ from openry.db import (
     get_commands_history,
     get_task_state,
     query_cancelled_tasks,
-    query_failed_with_retries,
     query_overflow_tasks,
     query_pending_validations,
     query_queued_tasks,
@@ -137,6 +136,7 @@ class Orchestrator:
         self._check_max_tool_calls()       # 3
         self._dispatch_queued()            # 4
         self._check_zombie_sessions()      # 5
+        self._validate_phase3a()           # 5.5  Phase 3a: conditional routing
         self._validate_completed()         # 6
         self._route_validated()            # 7
         self._hard_kill_cancelled()        # 8
@@ -318,7 +318,19 @@ class Orchestrator:
             else:
                 on_fail = step_config.get("on_validation_fail", "retry_current")
                 if on_fail == "retry_current":
-                    update_task_status(run_id, "queued", validation_status="failed")
+                    retry_count = task.get("sub_step_retry_count", 0)
+                    max_retries = step_config.get("max_sub_step_retries") or task.get("max_sub_step_retries") or 3
+                    if retry_count >= max_retries:
+                        print(
+                            f"[orchestrator] {run_id} validation retry budget exhausted "
+                            f"({retry_count}/{max_retries})"
+                        )
+                        update_task_status(run_id, "failed", validation_status="failed")
+                    else:
+                        update_task_status(
+                            run_id, "queued", validation_status="failed",
+                            sub_step_retry_count=retry_count + 1,
+                        )
                 else:
                     update_task_status(run_id, "failed", validation_status="failed")
 
@@ -389,9 +401,9 @@ class Orchestrator:
                 next_step.get("id"),
                 dump_payload(merged),
                 workflow_instance_id,
-                next_step.get("max_tool_calls", 0),
+                next_step.get("max_tool_calls") or 10,
                 big_step.get("max_retries", 0),
-                next_step.get("max_sub_step_retries", 0),
+                next_step.get("max_sub_step_retries") or 3,
                 next_step.get("max_output_tokens", 0),
                 next_step.get("on_output_overflow", ""),
                 next_step.get("on_validation_fail", "retry_current"),
@@ -428,9 +440,9 @@ class Orchestrator:
                 first_ref,
                 first_sub.get("id"),
                 workflow_instance_id,
-                first_sub.get("max_tool_calls", 0),
+                first_sub.get("max_tool_calls") or 10,
                 big_step.get("max_retries", 0),
-                first_sub.get("max_sub_step_retries", 0),
+                first_sub.get("max_sub_step_retries") or 3,
                 first_sub.get("max_output_tokens", 0),
                 first_sub.get("on_output_overflow", ""),
                 first_sub.get("on_validation_fail", "retry_current"),
@@ -531,24 +543,50 @@ class Orchestrator:
             # (Phase 3 will have proper completion tracking)
             pass
 
-    # ── Step 11: Retry failed ─────────────────────
+    # ── Step 11: Retry or drop failed ─────────────
 
     def _retry_failed(self) -> None:
-        """Re-enqueue failed tasks that still have retry budget."""
-        tasks = query_failed_with_retries()
-        for task in tasks:
-            run_id = task["run_id"]
-            retry_count = task.get("big_step_retry_count", 0)
-            max_retries = task.get("max_retries", 0)
+        """Evaluate all failed tasks: retry or drop.
 
-            if retry_count >= max_retries:
+        The ONLY place that decides whether a failed sub_step gets
+        another chance (→ queued) or is permanently dead (→ dropped).
+
+        Decision rule:
+          on_failure = retry  AND  sub_step_retry_count < max_sub_step_retries
+            → queued (retry current sub_step)
+          everything else
+            → dropped (terminal)
+        """
+        from openry.db import _get_conn
+
+        conn = _get_conn()
+        conn.row_factory = None
+        rows = conn.execute(
+            "SELECT run_id, sub_step_id, big_step_ref, "
+            "       sub_step_retry_count, max_sub_step_retries "
+            "FROM task_state WHERE status = 'failed'"
+        ).fetchall()
+        conn.close()
+
+        for run_id, sub_step_id, big_step_ref, sub_retry, max_sub in rows:
+            # Read YAML on_failure strategy
+            try:
+                big_step = load_big_step(big_step_ref)
+                step_config = get_sub_step_config(big_step, sub_step_id) or {}
+            except Exception:
+                step_config = {}
+            on_failure = step_config.get("on_failure", "abort")
+
+            # ── retry ──
+            if on_failure == "retry" and sub_retry < max_sub:
+                update_task_status(
+                    run_id, "queued",
+                    sub_step_retry_count=sub_retry + 1,
+                )
                 continue
 
-            # Increment retry count and re-enqueue
-            update_task_status(
-                run_id, "queued",
-                big_step_retry_count=retry_count + 1,
-            )
+            # ── drop ──
+            update_task_status(run_id, "dropped")
 
     # ── Helpers ───────────────────────────────────
 
@@ -586,3 +624,143 @@ class Orchestrator:
                     update_task_status(run_id, "queued")
             else:
                 update_task_status(run_id, "queued")
+
+    def _retry_or_fail(
+        self, task: dict, step_config: dict, run_id: str, reason: str,
+    ) -> None:
+        """Retry a sub_step or mark it failed if retry budget is exhausted.
+
+        Hard validation rule: if payload is incomplete, the agent MUST retry.
+        When max_sub_step_retries is exceeded, the task is permanently failed.
+        """
+        retry_count = task.get("sub_step_retry_count", 0)
+        max_retries = step_config.get("max_sub_step_retries") or task.get("max_sub_step_retries") or 3
+
+        on_missing = step_config.get("on_payload_missing", "retry_current")
+        if on_missing != "retry_current":
+            # Explicitly not retrying — mark as failed
+            print(f"[orchestrator] Phase 3a: {run_id} hard validation failed, abort: {reason}")
+            update_task_status(run_id, "failed", validation_status="failed")
+            return
+
+        if retry_count >= max_retries:
+            print(
+                f"[orchestrator] Phase 3a: {run_id} retry budget exhausted "
+                f"({retry_count}/{max_retries}): {reason}"
+            )
+            update_task_status(run_id, "failed", validation_status="failed")
+            # Kill the session if it's still alive
+            if run_id in self.active_sessions:
+                self._kill_session(run_id)
+            return
+
+        # Retry: increment counter and re-enqueue
+        new_count = retry_count + 1
+        print(
+            f"[orchestrator] Phase 3a: {run_id} retry {new_count}/{max_retries}: {reason}"
+        )
+        update_task_status(
+            run_id, "queued",
+            validation_status="failed",
+            sub_step_retry_count=new_count,
+        )
+        # Kill the current agent session so a new one spawns fresh
+        if run_id in self.active_sessions:
+            self._kill_session(run_id)
+
+    # ── Phase 3a: Conditional routing ─────────────
+
+    def _validate_phase3a(self) -> None:
+        """Evaluate validation_routing for completed tasks.
+
+        Runs BEFORE Phase 2's _validate_completed().  Tasks that have
+        validation_routing defined are evaluated with the Phase 3a
+        validator + router.  Their status is updated so that steps 6
+        and 7 (Phase 2 validation + routing) naturally skip them.
+
+        Execution order (per design §3.6):
+          ① Hard validation (payload_keys + expect_payload)
+          ② Conditional routing (validation_routing)
+
+        Tasks WITHOUT validation_routing are left untouched for
+        Phase 2 to handle.
+        """
+        tasks = query_pending_validations()
+        for task in tasks:
+            run_id = task["run_id"]
+            sub_step_id = task.get("sub_step_id", "")
+            big_step_ref = task.get("big_step_ref", "")
+
+            # Load step config
+            try:
+                big_step = load_big_step(big_step_ref)
+                step_config = get_sub_step_config(big_step, sub_step_id)
+            except Exception:
+                step_config = {}
+
+            if not step_config or not step_config.get("validation_routing"):
+                # No Phase 3a routing — leave for Phase 2
+                continue
+
+            # ── ① Hard validation: payload_keys + expect_payload ──
+            import json as _json
+            payload_raw = task.get("payload", "{}")
+            try:
+                payload = _json.loads(payload_raw) if isinstance(payload_raw, str) else (payload_raw or {})
+            except (_json.JSONDecodeError, TypeError):
+                payload = {}
+
+            # expect_payload check
+            if step_config.get("expect_payload") and not payload:
+                print(f"[orchestrator] Phase 3a: {run_id} expect_payload=True but no payload")
+                self._retry_or_fail(task, step_config, run_id, "expect_payload")
+                continue
+
+            # payload_keys check — must pass before routing
+            missing_keys = []
+            for key in step_config.get("payload_keys", []):
+                if key not in payload:
+                    missing_keys.append(key)
+
+            if missing_keys:
+                print(
+                    f"[orchestrator] Phase 3a: {run_id} missing payload keys: {missing_keys}"
+                )
+                self._retry_or_fail(task, step_config, run_id, f"missing keys: {missing_keys}")
+                continue
+
+            # ── ② Conditional routing ──
+            from .router import evaluate_routing  # local import avoids circular
+            try:
+                result = evaluate_routing(run_id, step_config)
+            except Exception as exc:
+                print(f"[orchestrator] Phase 3a routing error for {run_id}: {exc}")
+                # Fall through to Phase 2
+                continue
+
+            if result.action == "fallthrough":
+                # Let Phase 2 handle it
+                continue
+
+            # Apply routing decision
+            target = result.target
+            if target == "done":
+                update_task_status(run_id, "done", validation_status="passed")
+            elif target == "abort":
+                update_task_status(run_id, "failed", validation_status="failed")
+            elif target == "retry_current":
+                self._retry_or_fail(task, step_config, run_id, result.message)
+            else:
+                # Route to a specific sub_step
+                next_step = get_sub_step_config(big_step, target)
+                if next_step:
+                    # Mark current as done (not validated, to avoid step 7 double-processing)
+                    update_task_status(run_id, "done", validation_status="passed")
+                    self._enqueue_next_sub_step(task, big_step, next_step)
+                else:
+                    # Unknown target — abort
+                    print(
+                        f"[orchestrator] Phase 3a: unknown route target '{target}' "
+                        f"for {run_id}, aborting"
+                    )
+                    update_task_status(run_id, "failed", validation_status="failed")

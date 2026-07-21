@@ -7,17 +7,20 @@ import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry
 // ── sessionKey parser ──────────────────────────────────────────
 
 function parseSessionKey(sessionKey?: string) {
-  const fallback = { run_id: "unknown", workflow: "unknown", step_id: "unknown" };
+  const fallback = { run_id: "unknown", workflow: "unknown", step_id: "unknown", agent_id: "main" };
   if (!sessionKey) return fallback;
+  // Format: agent:{agentId}:openry:wf:{workflow}:step:{subStepId}:run:{runId}
   const parts = sessionKey.split(":");
   const runIdx = parts.lastIndexOf("run");
   const stepIdx = parts.lastIndexOf("step");
   const wfIdx = parts.lastIndexOf("wf");
+  const agentIdx = parts.indexOf("agent");
   if (runIdx === -1 || stepIdx === -1 || wfIdx === -1) return fallback;
   return {
     run_id: parts[runIdx + 1] ?? "unknown",
     workflow: parts[wfIdx + 1] ?? "unknown",
     step_id: parts[stepIdx + 1] ?? "unknown",
+    agent_id: (agentIdx >= 0 ? parts[agentIdx + 1] : "main") ?? "main",
   };
 }
 
@@ -57,7 +60,8 @@ const plugin = {
   register(api: any) {
     // ── openry_run ──
     api.registerTool((ctx: OpenClawPluginToolContext) => {
-      const { run_id } = parseSessionKey(ctx.sessionKey);
+      const { run_id, workflow, step_id, agent_id } = parseSessionKey(ctx.sessionKey);
+      const sessionKey = ctx.sessionKey || "";
 
       return {
         name: "openry_run",
@@ -76,7 +80,15 @@ const plugin = {
             return textResult("Error: command is required", null);
           }
           try {
-            const execEnv = { ...process.env, PATH: buildPath(), OPENRY_RUN_ID: run_id };
+            const execEnv = {
+              ...process.env,
+              PATH: buildPath(),
+              OPENRY_RUN_ID: run_id,
+              OPENRY_WORKFLOW: workflow,
+              OPENRY_STEP_ID: step_id,
+              OPENRY_AGENT_ID: agent_id,
+              OPENRY_SESSION_KEY: sessionKey,
+            };
             const stdout = execSync(
               `${OPENRY_CLI} -c "${escapeShell(command)}"`,
               {
@@ -88,8 +100,9 @@ const plugin = {
             );
             return textResult(stdout, null);
           } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            return textResult(`openry_run error: ${msg}`, null);
+            const execErr = err as { stdout?: string; stderr?: string; message?: string };
+            const detail = (execErr.stdout || execErr.stderr || execErr.message || String(err)).trim();
+            return textResult(detail || `openry_run error: ${String(err)}`, null);
           }
         },
       };
@@ -97,7 +110,8 @@ const plugin = {
 
     // ── openry_status ──
     api.registerTool((ctx: OpenClawPluginToolContext) => {
-      const { run_id } = parseSessionKey(ctx.sessionKey);
+      const { run_id, workflow, step_id, agent_id } = parseSessionKey(ctx.sessionKey);
+      const sessionKey = ctx.sessionKey || "";
 
       return {
         name: "openry_status",
@@ -132,7 +146,15 @@ const plugin = {
           const payloadJson = payload ? JSON.stringify(payload) : "{}";
 
           try {
-            const execEnv = { ...process.env, PATH: buildPath(), OPENRY_RUN_ID: run_id };
+            const execEnv = {
+              ...process.env,
+              PATH: buildPath(),
+              OPENRY_RUN_ID: run_id,
+              OPENRY_WORKFLOW: workflow,
+              OPENRY_STEP_ID: step_id,
+              OPENRY_AGENT_ID: agent_id,
+              OPENRY_SESSION_KEY: sessionKey,
+            };
             const stdout = execSync(
               `${OPENRY_CLI} --status ${status} --payload '${payloadJson.replace(/'/g, "'\\''")}'`,
               {
@@ -143,8 +165,9 @@ const plugin = {
             );
             return textResult(stdout.trim() || `Status updated: ${status}`, null);
           } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            return textResult(`openry_status error: ${msg}`, null);
+            const execErr = err as { stdout?: string; stderr?: string; message?: string };
+            const detail = (execErr.stdout || execErr.stderr || execErr.message || String(err)).trim();
+            return textResult(detail || `openry_status error: ${String(err)}`, null);
           }
         },
       };

@@ -16,6 +16,14 @@ export type BigStep = {
   sub_steps: SubStep[];
 };
 
+export type ValidationRoutingEntry = {
+  when?: Record<string, unknown>;
+  when_any?: Record<string, unknown>[];
+  on_match?: string;
+  on_mismatch?: string;
+  on_mismatch_message?: string;
+};
+
 export type SubStep = {
   id: string;
   kind?: string;
@@ -32,6 +40,9 @@ export type SubStep = {
   validation?: unknown[];
   on_validation_fail?: string;
   on_output_overflow?: string;
+  // Phase 3a
+  on_payload_missing?: string;
+  validation_routing?: ValidationRoutingEntry[];
 };
 
 export type Composition = {

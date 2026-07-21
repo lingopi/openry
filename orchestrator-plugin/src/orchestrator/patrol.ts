@@ -1,13 +1,13 @@
 /**
  * 巡查循环 — 通过 openclaw agent CLI 子进程调度 agent。
  * CLI 内部使用 Gateway WebSocket 协议（三次握手 + 双帧响应）。
- * 直接 WebSocket 方案见 design/phase2b-websocket-plan.md 和 gateway-client.ts
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { WorkerPool } from "./worker-pool.js";
 import { validateStep, type StepConfig } from "./validation.js";
+import { evaluateRouting } from "./router.js";
 import {
   loadBigStep,
   loadComposition,
@@ -53,6 +53,8 @@ export class PatrolLoop {
   stop(): void {
     this.running = false;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+
+    // SIGTERM → grace period → SIGKILL 所有子进程
     for (const [, proc] of this.activeRuns) {
       try { proc.kill("SIGTERM"); } catch { /* gone */ }
     }
@@ -66,6 +68,16 @@ export class PatrolLoop {
 
   // ── 主巡查 ──────────────────────────────────────────────────
 
+  /**
+   * Phase 3: CLI 已同步处理 validation/retry/drop（在 --status 时立即执行）。
+   * patrol loop 的职责简化为：
+   *   1-3: 超时/max_calls/调度（与 CLI 无关的编排层逻辑）
+   *   4:   调度 queued → spawn agent session
+   *   5-5.5: 僵死检测 + Phase 3a 路由（安全网）
+   *   6-7: validation + routing（安全网，CLI 已处理大多数情况）
+   *   8-10: 硬杀/overflow/恢复
+   *   11: 安全网 — 残留 failed 直接 dropped
+   */
   private patrol(): void {
     if (!this.running) return;
     try {
@@ -74,12 +86,13 @@ export class PatrolLoop {
       this.checkMaxToolCalls();    // 3. max_tool_calls 超限检测
       this.dispatchQueued();       // 4. 调度 queued 任务
       this.checkZombies();         // 5. 僵死检测
-      this.validateCompleted();    // 6. 验证 completed
+      this.validatePhase3a().catch(err => console.error("[orchestrator-plugin] Phase 3a error:", err)); // 5.5
+      this.validateCompleted();    // 6. 验证 completed (安全网)
       this.routeValidated();       // 7. 路由 validated
       this.hardKillCancelled();    // 8. 硬杀 cancelled
       this.handleOverflow();       // 9. overflow 处理
       this.recoverOverflow();      // 10. overflow 恢复
-      this.retryFailed();          // 11. big_step 重试
+      this.retryFailed();          // 11. 安全网：残留 failed → dropped
     } catch (err) {
       console.error("[orchestrator-plugin] patrol error:", err);
     }
@@ -253,6 +266,132 @@ export class PatrolLoop {
     }
   }
 
+  // ── 5.5 Phase 3a: 高级验证 + 条件路由 ─────────────────────
+
+  /**
+   * 在 Phase 2 验证之前拦截带 validation_routing 的任务。
+   * 执行顺序：① 硬验证（payload_keys）→ ② 条件路由（when/when_any）。
+   * 处理完的任务状态不再是 'completed'，step 6 自然跳过。
+   */
+  private async validatePhase3a(): Promise<void> {
+    const tasks = db.queryPendingValidations(this.db);
+    for (const task of tasks) {
+      const runId = task.run_id as string;
+      const subStepId = (task.sub_step_id as string) || "";
+      const bigStepRef = (task.big_step_ref as string) || "";
+      const wfInstanceId = (task.workflow_instance_id as number) || 0;
+
+      let subStep: SubStep | undefined;
+      let bigStep: BigStep | undefined;
+      try {
+        bigStep = loadBigStep(bigStepRef);
+        subStep = getSubStepConfig(bigStep, subStepId);
+      } catch {
+        subStep = undefined;
+      }
+
+      if (!subStep?.validation_routing?.length) {
+        // No Phase 3a routing — leave for Phase 2
+        continue;
+      }
+
+      // ── ① Hard validation: payload_keys + expect_payload ──
+      const payloadRaw = (task.payload as string) || "{}";
+      let payload: Record<string, unknown> = {};
+      try { payload = JSON.parse(payloadRaw); } catch { /* keep empty */ }
+
+      // expect_payload check
+      if (subStep.expect_payload && Object.keys(payload).length === 0) {
+        console.log(`[orchestrator-plugin] Phase 3a: ${runId} expect_payload=True but no payload`);
+        db.retryOrFail(this.db, runId, subStep.max_sub_step_retries ?? 3, "expect_payload");
+        continue;
+      }
+
+      // payload_keys check
+      const missingKeys: string[] = [];
+      for (const key of subStep.payload_keys ?? []) {
+        if (!(key in payload)) missingKeys.push(key);
+      }
+      if (missingKeys.length > 0) {
+        const onMissing = subStep.on_payload_missing ?? "retry_current";
+        if (onMissing !== "retry_current") {
+          console.log(`[orchestrator-plugin] Phase 3a: ${runId} hard validation failed: missing ${missingKeys.join(", ")}`);
+          db.updateTaskStatus(this.db, runId, "failed", { validation_status: "failed" });
+          if (wfInstanceId) db.updateWorkflowInstanceStatus(this.db, wfInstanceId, "failed");
+        } else {
+          console.log(`[orchestrator-plugin] Phase 3a: ${runId} missing payload keys: ${missingKeys.join(", ")}`);
+          const rr = db.retryOrFail(this.db, runId, subStep.max_sub_step_retries ?? 3,
+            `missing keys: ${missingKeys.join(", ")}`);
+          if (rr.exhausted && wfInstanceId) {
+            db.updateWorkflowInstanceStatus(this.db, wfInstanceId, "failed");
+          }
+        }
+        continue;
+      }
+
+      // ── ② Conditional routing ──
+      try {
+        const stepConfig = {
+          on_success: subStep.on_success,
+          on_failure: subStep.on_failure,
+          validation_routing: subStep.validation_routing,
+        };
+        const result = await evaluateRouting(this.db, runId, stepConfig);
+
+        if (result.action === "fallthrough") {
+          // Let Phase 2 handle
+          continue;
+        }
+
+        const target = result.target;
+        if (target === "done") {
+          db.updateTaskStatus(this.db, runId, "done", { validation_status: "passed" });
+          if (wfInstanceId) db.updateWorkflowInstanceStatus(this.db, wfInstanceId, "completed");
+        } else if (target === "abort") {
+          db.updateTaskStatus(this.db, runId, "failed", { validation_status: "failed" });
+          if (wfInstanceId) db.updateWorkflowInstanceStatus(this.db, wfInstanceId, "failed");
+        } else if (target === "retry_current") {
+          const rr = db.retryOrFail(this.db, runId, subStep.max_sub_step_retries ?? 3, result.message);
+          if (rr.exhausted && wfInstanceId) {
+            db.updateWorkflowInstanceStatus(this.db, wfInstanceId, "failed");
+          }
+        } else if (bigStep) {
+          // Route to a specific sub_step
+          const nextStep = getSubStepConfig(bigStep, target);
+          if (nextStep) {
+            db.updateTaskStatus(this.db, runId, "done", { validation_status: "passed" });
+            // Enqueue the target sub_step
+            const newRunId = crypto.randomUUID();
+            const inherit = nextStep.inherit_payload ?? false;
+            const nextPayload = inherit ? payloadRaw : "{}";
+            db.enqueueNextSubStep(this.db, {
+              newRunId,
+              workflow: (task.workflow as string) || "",
+              bigStepRef,
+              subStepId: nextStep.id,
+              stepId: nextStep.id,
+              payload: nextPayload,
+              workflowInstanceId: (task.workflow_instance_id as number) || 0,
+              maxToolCalls: nextStep.max_tool_calls ?? 10,
+              maxRetries: bigStep.max_retries ?? 0,
+              maxSubStepRetries: nextStep.max_sub_step_retries ?? 3,
+              maxOutputTokens: nextStep.max_output_tokens ?? 0,
+              onOutputOverflow: nextStep.on_output_overflow ?? "",
+              onValidationFail: nextStep.on_validation_fail ?? "retry_current",
+            });
+          } else {
+            console.log(`[orchestrator-plugin] Phase 3a: unknown route target '${target}' for ${runId}`);
+            db.updateTaskStatus(this.db, runId, "failed", { validation_status: "failed" });
+            if (wfInstanceId) db.updateWorkflowInstanceStatus(this.db, wfInstanceId, "failed");
+          }
+        }
+      } catch (err) {
+        console.error(`[orchestrator-plugin] Phase 3a routing error for ${runId}:`, err);
+        // Fall through to Phase 2
+      }
+    }
+  }
+
   // ── 6. 验证 completed ───────────────────────────────────────
 
   private validateCompleted(): void {
@@ -263,9 +402,10 @@ export class PatrolLoop {
       const bigStepRef = (task.big_step_ref as string) || "";
 
       let stepConfig: StepConfig = {};
+      let ss: SubStep | undefined;
       try {
         const bigStep = loadBigStep(bigStepRef);
-        const ss = getSubStepConfig(bigStep, subStepId);
+        ss = getSubStepConfig(bigStep, subStepId);
         if (ss) {
           stepConfig = {
             expect_payload: ss.expect_payload,
@@ -294,7 +434,27 @@ export class PatrolLoop {
       } else {
         const onFail = stepConfig.on_validation_fail ?? "retry_current";
         if (onFail === "retry_current") {
-          db.updateTaskStatus(this.db, runId, "queued", { validation_status: "failed" });
+          const retryCount = (task.sub_step_retry_count as number) || 0;
+          // Read max_sub_step_retries from YAML step config first, then task record, default 3
+          const maxRetries =
+            (ss?.max_sub_step_retries as number) ||
+            (task.max_sub_step_retries as number) ||
+            3;
+          if (retryCount >= maxRetries) {
+            console.log(
+              `[orchestrator-plugin] ${runId} validation retry budget exhausted ` +
+              `(${retryCount}/${maxRetries})`,
+            );
+            db.updateTaskStatus(this.db, runId, "failed", { validation_status: "failed" });
+          } else {
+            db.updateTaskStatus(this.db, runId, "queued", { validation_status: "failed" });
+            // Increment sub_step_retry_count
+            this.db.prepare(
+              `UPDATE task_state SET sub_step_retry_count = ?, updated_at = datetime('now') WHERE run_id = ?`,
+            ).run(retryCount + 1, runId);
+            // Stop running agent so it can't overwrite DB with more completed calls
+            this.killRun(runId);
+          }
         } else {
           db.updateTaskStatus(this.db, runId, "failed", { validation_status: "failed" });
         }
@@ -355,9 +515,9 @@ export class PatrolLoop {
       stepId: nextStep.id,
       payload: JSON.stringify(merged),
       workflowInstanceId: (task.workflow_instance_id as number) || 0,
-      maxToolCalls: nextStep.max_tool_calls ?? 0,
+      maxToolCalls: nextStep.max_tool_calls ?? 10,
       maxRetries: bigStep.max_retries ?? 0,
-      maxSubStepRetries: nextStep.max_sub_step_retries ?? 0,
+      maxSubStepRetries: nextStep.max_sub_step_retries ?? 3,
       maxOutputTokens: nextStep.max_output_tokens ?? 0,
       onOutputOverflow: nextStep.on_output_overflow ?? "",
       onValidationFail: nextStep.on_validation_fail ?? "retry_current",
@@ -398,9 +558,9 @@ export class PatrolLoop {
               stepId: firstSub.id,
               payload: "{}",
               workflowInstanceId: wfId,
-              maxToolCalls: firstSub.max_tool_calls ?? 0,
+              maxToolCalls: firstSub.max_tool_calls ?? 10,
               maxRetries: bigStep.max_retries ?? 0,
-              maxSubStepRetries: firstSub.max_sub_step_retries ?? 0,
+              maxSubStepRetries: firstSub.max_sub_step_retries ?? 3,
               maxOutputTokens: firstSub.max_output_tokens ?? 0,
               onOutputOverflow: firstSub.on_output_overflow ?? "",
               onValidationFail: firstSub.on_validation_fail ?? "retry_current",
@@ -446,6 +606,14 @@ export class PatrolLoop {
         continue;
       }
 
+      // Save command history as context for overflow recovery (matches Python engine)
+      const history = db.getCommandsHistory(this.db, runId);
+      if (history.length > 0) {
+        this.db.prepare(
+          `UPDATE task_state SET previous_summary = ? WHERE run_id = ?`,
+        ).run(JSON.stringify(history), runId);
+      }
+
       try {
         // Create a new workflow instance for the overflow handler
         const overflowRunId = randomUUID();
@@ -476,9 +644,9 @@ export class PatrolLoop {
               overflow_type: "output_overflow",
             }),
             workflowInstanceId: overflowWfId.id,
-            maxToolCalls: firstSub.max_tool_calls ?? 0,
+            maxToolCalls: firstSub.max_tool_calls ?? 10,
             maxRetries: bigStep.max_retries ?? 0,
-            maxSubStepRetries: firstSub.max_sub_step_retries ?? 0,
+            maxSubStepRetries: firstSub.max_sub_step_retries ?? 3,
             maxOutputTokens: firstSub.max_output_tokens ?? 0,
             onOutputOverflow: firstSub.on_output_overflow ?? "",
             onValidationFail: firstSub.on_validation_fail ?? "retry_current",
@@ -550,9 +718,9 @@ export class PatrolLoop {
             : {},
         }),
         workflowInstanceId: (task as unknown as Record<string, unknown>).workflow_instance_id as number || 0,
-        maxToolCalls: 0,
+        maxToolCalls: 10,
         maxRetries: 0,
-        maxSubStepRetries: 0,
+        maxSubStepRetries: 3,
         maxOutputTokens: 0,
         onOutputOverflow: "",
         onValidationFail: "retry_current",
@@ -569,43 +737,32 @@ export class PatrolLoop {
     }
   }
 
-  // ── 11. 重试 failed (big_step + sub_step 两级) ───────────────
+  // ── 11. 重试 failed — 安全网（CLI 已同步处理，这里只清理残留）───
 
+  /**
+   * Phase 3: CLI 在 --status failed/complete 时已同步执行 retry/drop 逻辑。
+   * 此方法作为安全网，仅将残留的 failed 状态任务标记为 dropped（CLI 崩溃等极端情况）。
+   * big_step 级别重试已废弃。
+   */
   private retryFailed(): void {
-    // Big-step level retry
-    const tasks = db.queryFailedWithRetries(this.db);
-    for (const task of tasks) {
-      const runId = task.run_id as string;
-      db.incrementBigStepRetry(this.db, runId);
-      db.updateTaskStatus(this.db, runId, "queued");
-    }
-
-    // Sub-step level retry: on_failure=retry with remaining retries
-    const subRetryTasks = this.db
-      .prepare(
-        `SELECT * FROM task_state
-         WHERE status = 'failed'
-           AND sub_step_retry_count < max_sub_step_retries
-           AND max_sub_step_retries > 0`,
-      )
+    const allFailed = this.db
+      .prepare("SELECT * FROM task_state WHERE status = 'failed'")
       .all() as Array<Record<string, unknown>>;
 
-    for (const task of subRetryTasks) {
+    for (const task of allFailed) {
       const runId = task.run_id as string;
-      const current = (task.sub_step_retry_count as number) || 0;
-      this.db.prepare(
-        `UPDATE task_state
-         SET sub_step_retry_count = ?,
-             status = 'queued',
-             updated_at = datetime('now')
-         WHERE run_id = ?`,
-      ).run(current + 1, runId);
+      // Safety net: CLI should have processed this; if still 'failed', drop it
+      db.updateTaskStatus(this.db, runId, "dropped");
+      console.log(
+        `[orchestrator-plugin] ${runId} dropped (safety net: CLI did not process failed state)`,
+      );
     }
   }
 
   // ── helpers ──────────────────────────────────────────────────
 
   private killRun(runId: string): void {
+    // SIGTERM → 5s → SIGKILL
     const proc = this.activeRuns.get(runId);
     if (proc) {
       try { proc.kill("SIGTERM"); } catch { /* gone */ }
