@@ -27,19 +27,41 @@ const WorkflowTree = {
 
   _renderSidebar(data) {
     const sidebar = document.getElementById('workflowList');
-    const all = [...(data.compositions || [])];
-    if (all.length === 0) {
-      sidebar.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><p>No workflows found</p><p style="font-size:11px;margin-top:4px">Add .yaml files to ~/.openry/workflows/</p></div>';
+    const compositions = data.compositions || [];
+    const workflows = data.workflows || [];
+
+    if (compositions.length === 0 && workflows.length === 0) {
+      sidebar.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><p>No workflows found</p><p style="font-size:11px;margin-top:4px">Add .yaml files to ~/.openry/</p></div>';
       return;
     }
 
-    sidebar.innerHTML = all.map(name => `
-      <div class="card" data-workflow="${name}" onclick="WorkflowTree.selectWorkflow('${name}')">
-        <div class="card-header">
-          <span class="card-title">📋 ${name}</span>
+    let html = '';
+
+    // Compositions group
+    if (compositions.length > 0) {
+      html += '<div class="sidebar-group-header"><span class="sidebar-group-icon">📋</span> Compositions</div>';
+      html += compositions.map(name => `
+        <div class="card" data-type="composition" data-name="${name}" onclick="WorkflowTree.selectWorkflow('${name}')">
+          <div class="card-header">
+            <span class="card-title">📋 ${name}</span>
+          </div>
         </div>
-      </div>
-    `).join('');
+      `).join('');
+    }
+
+    // Workflows group
+    if (workflows.length > 0) {
+      html += '<div class="sidebar-group-header"><span class="sidebar-group-icon">⚡</span> Workflows</div>';
+      html += workflows.map(name => `
+        <div class="card" data-type="workflow" data-name="${name}" onclick="WorkflowTree.selectWorkflow('${name}')">
+          <div class="card-header">
+            <span class="card-title">⚡ ${name}</span>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    sidebar.innerHTML = html;
   },
 
   async selectWorkflow(name) {

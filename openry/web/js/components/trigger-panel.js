@@ -22,12 +22,22 @@ const TriggerPanel = {
 
     try {
       const data = await API.getWorkflows();
-      const all = [...(data.compositions || []), ...(data.workflows || [])];
+      const compositions = data.compositions || [];
+      const workflows = data.workflows || [];
       const sel = document.getElementById('triggerWorkflow');
-      sel.innerHTML = all.map(n => `<option value="${n}">${n}</option>`).join('');
-      if (all.length === 0) {
-        sel.innerHTML = '<option value="">-- No workflows --</option>';
+
+      let html = '';
+      if (compositions.length > 0) {
+        html += '<optgroup label="📋 Compositions">';
+        html += compositions.map(n => `<option value="${n}">${n}</option>`).join('');
+        html += '</optgroup>';
       }
+      if (workflows.length > 0) {
+        html += '<optgroup label="⚡ Workflows">';
+        html += workflows.map(n => `<option value="${n}">${n}</option>`).join('');
+        html += '</optgroup>';
+      }
+      sel.innerHTML = html || '<option value="">-- No workflows --</option>';
     } catch (e) {
       document.getElementById('triggerWorkflow').innerHTML = '<option value="">-- Error loading --</option>';
     }

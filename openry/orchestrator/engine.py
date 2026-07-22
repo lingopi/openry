@@ -87,6 +87,32 @@ class Orchestrator:
         self._enqueue_first_sub_step(workflow_instance_id, comp)
         return workflow_instance_id
 
+    def start_big_step(self, workflow_name: str) -> int:
+        """Start a workflow instance directly from a Big Step YAML (no composition).
+
+        Bypasses the composition layer and runs a single big_step as a standalone
+        workflow. Stores the workflow name in the composition column for backward
+        compatibility with frontend queries.
+
+        Returns workflow_instance_id.
+        """
+        big_step = load_big_step(workflow_name)
+        _init_phase2_schema()
+
+        from openry.db import _get_conn
+        conn = _get_conn()
+        cursor = conn.execute(
+            """INSERT INTO workflow_instances (composition, status, current_big_step)
+               VALUES (?, 'running', ?)""",
+            (workflow_name, workflow_name),
+        )
+        workflow_instance_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+
+        self._enqueue_first_sub_step_direct(workflow_instance_id, big_step, workflow_name)
+        return workflow_instance_id
+
     def serve(self) -> None:
         """Run the patrol loop (blocking)."""
         _init_phase2_schema()
@@ -438,6 +464,46 @@ class Orchestrator:
                 comp.get("name"),
                 first_sub.get("id"),
                 first_ref,
+                first_sub.get("id"),
+                workflow_instance_id,
+                first_sub.get("max_tool_calls") or 10,
+                big_step.get("max_retries", 0),
+                first_sub.get("max_sub_step_retries") or 3,
+                first_sub.get("max_output_tokens", 0),
+                first_sub.get("on_output_overflow", ""),
+                first_sub.get("on_validation_fail", "retry_current"),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    def _enqueue_first_sub_step_direct(
+        self, workflow_instance_id: int, big_step: dict, workflow_name: str
+    ) -> None:
+        """Enqueue the first sub_step directly from a loaded big_step dict.
+
+        Additive counterpart to _enqueue_first_sub_step() for the
+        composition-free path used by start_big_step().
+        """
+        first_sub = get_first_sub_step(big_step)
+        if not first_sub:
+            return
+
+        run_id = str(uuid.uuid4())
+        from openry.db import _get_conn
+        conn = _get_conn()
+        conn.execute(
+            """INSERT INTO task_state
+               (run_id, workflow, step_id, big_step_ref, sub_step_id,
+                status, payload, workflow_instance_id, max_tool_calls,
+                max_retries, max_sub_step_retries, max_output_tokens,
+                on_output_overflow, on_validation_fail)
+               VALUES (?, ?, ?, ?, ?, 'queued', '{}', ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id,
+                workflow_name,
+                first_sub.get("id"),
+                workflow_name,
                 first_sub.get("id"),
                 workflow_instance_id,
                 first_sub.get("max_tool_calls") or 10,

@@ -289,7 +289,11 @@ def _api_trigger(handler, body: dict) -> None:
     try:
         from openry.orchestrator.engine import Orchestrator
         orch = Orchestrator()
-        instance_id = orch.start_workflow(composition_name)
+        # Try composition first; fall back to direct big_step execution
+        try:
+            instance_id = orch.start_workflow(composition_name)
+        except FileNotFoundError:
+            instance_id = orch.start_big_step(composition_name)
         _send_json(handler, {
             "composition_id": instance_id,
             "message": f"Workflow '{composition_name}' started",
