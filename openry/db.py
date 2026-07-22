@@ -54,7 +54,25 @@ def _get_conn(db_path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
     conn.commit()
+    # Ensure Phase 2+ columns exist (idempotent ALTER TABLE, safe to call every time)
+    _ensure_phase2_columns(conn)
     return conn
+
+
+def _ensure_phase2_columns(conn: sqlite3.Connection) -> None:
+    """Add any missing Phase 2+ columns to task_state (idempotent)."""
+    existing_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(task_state)").fetchall()
+    }
+    for col_name, col_def in _TASK_STATE_EXTENSION:
+        if col_name not in existing_cols:
+            try:
+                conn.execute(
+                    f"ALTER TABLE task_state ADD COLUMN {col_name} {col_def}"
+                )
+            except sqlite3.OperationalError:
+                pass  # race condition safety
+    conn.commit()
 
 
 def insert_command(
@@ -185,6 +203,7 @@ _TASK_STATE_EXTENSION = [
     ("overflow_workflow_id",   "INTEGER"),
     ("workflow_instance_id",   "INTEGER"),
     ("on_validation_fail",     "TEXT"),
+    ("routing_target",         "TEXT"),
     ("on_output_overflow",     "TEXT"),
     ("previous_summary",       "TEXT"),
 ]
@@ -194,20 +213,7 @@ def _init_phase2_schema(db_path: Path | None = None) -> None:
     """Apply Phase 2 schema extensions to an existing Phase 1 DB."""
     conn = _get_conn(db_path)
     conn.executescript(_PHASE2_SCHEMA_EXTENSION)
-
-    # Add missing columns to task_state (ignore if they already exist)
-    existing_cols = {
-        row[1] for row in conn.execute("PRAGMA table_info(task_state)").fetchall()
-    }
-    for col_name, col_def in _TASK_STATE_EXTENSION:
-        if col_name not in existing_cols:
-            try:
-                conn.execute(
-                    f"ALTER TABLE task_state ADD COLUMN {col_name} {col_def}"
-                )
-            except sqlite3.OperationalError:
-                pass  # Column already exists (race condition safety)
-    conn.commit()
+    _ensure_phase2_columns(conn)
     conn.close()
 
 

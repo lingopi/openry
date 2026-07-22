@@ -267,7 +267,85 @@ def _validate_payload(run_id: str, payload: dict, step_config: dict) -> tuple[bo
             if row is None:
                 return False, f"数据库查询无结果: {rule['query']}"
 
+        else:
+            # Phase 3a: delegate to unified validator for new types
+            # (payload_values_not_equal, payload_value_equals, payload_value_in_set,
+            #  payload_value_greater_than, payload_value_less_than, payload_type,
+            #  file_size_greater_than, http_status, json_schema)
+            from .orchestrator.validator import validate, ValidationContext
+            ctx = ValidationContext(run_id=run_id, payload=payload)
+            result = validate(ctx, rule)
+            if not result.passed:
+                return False, result.message or f"验证失败: {rule_type}"
+
     return True, ""
+
+
+# ──────────────────────────────────────────────
+#  Phase 3a: sync conditional routing (runs in CLI)
+# ──────────────────────────────────────────────
+
+
+def _evaluate_routing_sync(run_id: str, payload: dict, step_config: dict) -> dict:
+    """Evaluate validation_routing entries synchronously in CLI.
+
+    Returns a dict with:
+      - action: "route" | "fallthrough"
+      - target: "done" | "abort" | "retry_current" | "continue" | sub_step_id
+      - message: human-readable description
+    """
+    from .orchestrator.validator import validate, ValidationContext
+
+    entries = step_config.get("validation_routing", [])
+    if not entries:
+        return {"action": "fallthrough", "target": "", "message": "no validation_routing"}
+
+    ctx = ValidationContext(run_id=run_id, payload=payload)
+    error_count = 0
+
+    for entry in entries:
+        # when_any: OR group
+        if "when_any" in entry:
+            any_passed = False
+            for condition in entry["when_any"]:
+                result = validate(ctx, condition)
+                if result.passed:
+                    any_passed = True
+                    break
+            if any_passed:
+                target = entry.get("on_match", "continue")
+                if target == "continue":
+                    continue  # go to next entry
+                return {"action": "route", "target": target, "message": "when_any matched"}
+            else:
+                target = entry.get("on_mismatch", "abort")
+                msg = entry.get("on_mismatch_message", "when_any: no condition matched")
+                return {"action": "route", "target": target, "message": msg}
+
+        # when: single condition
+        elif "when" in entry:
+            condition = entry["when"]
+            result = validate(ctx, condition)
+            if result.passed:
+                target = entry.get("on_match", "continue")
+                if target == "continue":
+                    continue
+                return {"action": "route", "target": target, "message": result.message or "condition passed"}
+            else:
+                target = entry.get("on_mismatch", "abort")
+                msg = entry.get("on_mismatch_message", result.message or "condition failed")
+                return {"action": "route", "target": target, "message": msg}
+
+        else:
+            error_count += 1
+            continue
+
+    if error_count == len(entries):
+        return {"action": "fallthrough", "target": "", "message": "all entries errored"}
+
+    # All entries passed
+    on_success = step_config.get("on_success", "done")
+    return {"action": "route", "target": on_success, "message": "all routing entries passed"}
 
 
 # ──────────────────────────────────────────────
@@ -556,18 +634,89 @@ def cmd_status(args: argparse.Namespace) -> None:
             passed, reason = _validate_payload(run_id, payload_dict, step_config)
 
             if passed:
-                conn.execute(
-                    "UPDATE task_state SET status = 'validated', validation_status = 'passed',"
-                    " updated_at = datetime('now') WHERE run_id = ?",
-                    (run_id,),
-                )
-                result = {
-                    "status": "completed",
-                    "action": "validated",
-                    "payload": payload_dict,
-                    "acknowledged": True,
-                    "message": "✅ 验证通过，步骤完成。会话已终止。",
-                }
+                # Phase 3a: check validation_routing for conditional routing
+                routing = _evaluate_routing_sync(run_id, payload_dict, step_config)
+                routing_target = routing.get("target", "")
+                routing_action = routing.get("action", "fallthrough")
+
+                if routing_action == "route" and routing_target:
+                    if routing_target == "done":
+                        conn.execute(
+                            "UPDATE task_state SET status = 'validated', validation_status = 'passed',"
+                            " updated_at = datetime('now') WHERE run_id = ?",
+                            (run_id,),
+                        )
+                        result = {
+                            "status": "completed", "action": "validated",
+                            "payload": payload_dict, "acknowledged": True,
+                            "message": f"✅ 验证通过 → 路由: {routing_target}。",
+                        }
+                    elif routing_target == "abort":
+                        conn.execute(
+                            "UPDATE task_state SET status = 'dropped', validation_status = 'failed',"
+                            " updated_at = datetime('now') WHERE run_id = ?",
+                            (run_id,),
+                        )
+                        result = {
+                            "status": "completed", "action": "dropped",
+                            "reason": f"条件路由: {routing.get('message', 'abort')}",
+                            "acknowledged": True,
+                            "message": f"❌ 条件路由: {routing.get('message', '')}",
+                        }
+                    elif routing_target == "retry_current":
+                        new_count = db_retry_count + 1
+                        max_retries = step_config.get("max_sub_step_retries", db_max_sub_retries or 3)
+                        if new_count <= max_retries:
+                            conn.execute(
+                                "UPDATE task_state SET status = 'in_progress',"
+                                " sub_step_retry_count = ?, validation_status = 'failed',"
+                                " updated_at = datetime('now') WHERE run_id = ?",
+                                (new_count, run_id),
+                            )
+                            result = {
+                                "status": "completed", "action": "routing_retry",
+                                "retry": f"{new_count}/{max_retries}",
+                                "reason": routing.get("message", ""),
+                                "hint": f"条件路由要求重试（{new_count}/{max_retries}）：{routing.get('message', '')}。请修正后重新 --status completed。",
+                                "acknowledged": True,
+                            }
+                        else:
+                            conn.execute(
+                                "UPDATE task_state SET status = 'dropped', validation_status = 'failed',"
+                                " updated_at = datetime('now') WHERE run_id = ?",
+                                (run_id,),
+                            )
+                            result = {
+                                "status": "completed", "action": "dropped",
+                                "reason": f"条件路由重试耗尽（{routing.get('message', '')}）",
+                                "acknowledged": True,
+                                "message": "❌ 条件路由重试已耗尽。",
+                            }
+                    else:
+                        # sub_step_id target — set validated + routing_target for patrol
+                        conn.execute(
+                            "UPDATE task_state SET status = 'validated', validation_status = 'passed',"
+                            " routing_target = ?, updated_at = datetime('now') WHERE run_id = ?",
+                            (routing_target, run_id),
+                        )
+                        result = {
+                            "status": "completed", "action": "validated",
+                            "routing_target": routing_target,
+                            "payload": payload_dict, "acknowledged": True,
+                            "message": f"✅ 验证通过 → 路由到: {routing_target}。",
+                        }
+                else:
+                    # No routing or fallthrough — standard validated
+                    conn.execute(
+                        "UPDATE task_state SET status = 'validated', validation_status = 'passed',"
+                        " updated_at = datetime('now') WHERE run_id = ?",
+                        (run_id,),
+                    )
+                    result = {
+                        "status": "completed", "action": "validated",
+                        "payload": payload_dict, "acknowledged": True,
+                        "message": "✅ 验证通过，步骤完成。会话已终止。",
+                    }
             else:
                 on_vfail = step_config.get("on_validation_fail", db_on_vfail or "retry_current")
                 max_retries = step_config.get("max_sub_step_retries", db_max_sub_retries or 3)

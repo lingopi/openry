@@ -471,6 +471,20 @@ export class PatrolLoop {
       const subStepId = (task.sub_step_id as string) || "";
       const bigStepRef = (task.big_step_ref as string) || "";
 
+      // Phase 3a: check for routing_target set by CLI sync routing
+      const routingTarget = (task.routing_target as string) || "";
+      if (routingTarget && routingTarget !== "done" && routingTarget !== "abort" && routingTarget !== "retry_current") {
+        try {
+          const bigStep = loadBigStep(bigStepRef);
+          const targetStep = getSubStepConfig(bigStep, routingTarget);
+          if (targetStep) {
+            this.enqueueNextSubStep(task, bigStep, targetStep);
+            console.log(`[orchestrator-plugin] ${runId} routed to ${routingTarget} via validation_routing`);
+            continue;
+          }
+        } catch { /* fall through to normal routing */ }
+      }
+
       try {
         const bigStep = loadBigStep(bigStepRef);
         const ss = getSubStepConfig(bigStep, subStepId);
