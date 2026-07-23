@@ -45,6 +45,10 @@ function escapeShell(cmd: string): string {
   return cmd.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+// ── trusted policy ─────────────────────────────────────────────
+
+import { evaluateOpenryExecGate } from "./tools/trusted-policy.js";
+
 // ── service ────────────────────────────────────────────────────
 
 import { createOrchestratorService } from "./orchestrator/service.js";
@@ -171,6 +175,15 @@ const plugin = {
           }
         },
       };
+    });
+
+    // ── trusted tool policy ──
+    api.registerTrustedToolPolicy({
+      id: "openry-exec-gate",
+      description:
+        "Blocks all non-openry tool calls in OpenRY worker sessions. " +
+        "All operations must go through openry_run for audit logging and policy enforcement.",
+      evaluate: evaluateOpenryExecGate,
     });
 
     // ── orchestrator service ──
