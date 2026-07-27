@@ -4,6 +4,9 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import Database from "better-sqlite3";
 import { WorkerPool } from "./worker-pool.js";
 import { validateStep, type StepConfig } from "./validation.js";
@@ -16,9 +19,134 @@ import {
   getNextSubStep,
   type BigStep,
   type SubStep,
+  type PromptBlock,
 } from "./yaml-loader.js";
 import { buildSessionKey } from "./session-key.js";
 import * as db from "./db-client.js";
+import {
+  isStdoutOverflow,
+  truncateStdout,
+  buildOverflowSummary,
+  buildStdoutPayload,
+  interpolateCommand,
+  mapExitCode,
+} from "./shell-executor.js";
+
+// ── KnowQL agent guide ─────────────────────────────────────────
+// Injected into opening message when sub_step.allow_payload_query is true.
+// Read from external .md file for easy updates without recompilation.
+
+const KNOWQL_GUIDE_PATH = path.join(os.homedir(), ".openry", "prompts", "knowql-agent-prompt.md");
+
+function loadKnowQLGuide(): string {
+  try {
+    if (fs.existsSync(KNOWQL_GUIDE_PATH)) {
+      return `---\n${fs.readFileSync(KNOWQL_GUIDE_PATH, "utf-8")}\n---`;
+    }
+  } catch { /* fallback to inline default */ }
+  return getDefaultKnowQLGuide();
+}
+
+function getDefaultKnowQLGuide(): string {
+  return `\
+---
+## Available Tool: openry_payload_query
+
+IMPORTANT: This is an OpenClaw TOOL (function call), NOT a shell command.
+Do NOT run it through openry_run. Call it DIRECTLY like openry_status.
+
+### Discover — explore what exists
+
+discover "runtime" → list completed steps in current workflow
+  Call: {"discover":"runtime"}
+  Returns: {workflow_instance_id, composition, steps: [{step_id, run_id, status, description, updated_at}], total}
+  Only returns steps with status "done" or "abort".
+
+discover "compositions" → list all available workflow compositions
+  Call: {"discover":"compositions"}
+  Returns: {compositions: [{name, description, big_steps: [{ref, description}]}], total}
+
+discover "big_step" → view sub-steps of a specific big_step
+  Call: {"discover":"big_step","ref":"file_analysis"}
+  Returns: {ref, name, description, sub_steps: [{id, kind, description}]}
+
+### Query Payload — retrieve full payload
+
+Via run_id (preferred — exact primary key lookup):
+  Call: {"query":"payload","run_id":"5355f700-bbf3-4c84-b6a2-0044aa8d1eb9"}
+  Returns: {run_id, step_id, status, workflow_instance_id, updated_at, payload: {...}}
+
+Via step_id (for cross-composition or when run_id unknown):
+  Call: {"query":"payload","step_id":"collect_profile"}
+  Optional filters:
+    time: "latest" (default) or date like "2026-07-23"
+    status: "done" (default) or ["done","abort"]
+    limit: 3 (default, max results)
+    contains: "keyword" (text search in payload)
+
+### Recommended flow
+1. {"discover":"runtime"} → see what steps ran + their run_ids
+2. {"query":"payload","run_id":"<from step 1>"} → get full payload
+
+For cross-composition:
+1. {"discover":"compositions"} → browse available workflows
+2. {"discover":"big_step","ref":"<ref>"} → see sub-steps
+3. {"query":"payload","step_id":"<id>","composition":"<name>"} → get payload
+
+### Tips
+- All queries default to current workflow instance (no cross-instance leaks)
+- Use run_id from discover runtime for fastest payload lookup
+- If step_id not found, use discover to find the correct one
+---`;
+}
+
+/**
+ * 渲染 prompt_blocks 为文本。
+ * 支持的 block 类型：
+ *   - text: 直接追加 content，可带 label
+ *   - file: 读取文件内容追加，可带 label
+ */
+function renderPromptBlocks(blocks: PromptBlock[]): string {
+  const promptBlocksDir = path.join(os.homedir(), ".openry", "prompt_blocks");
+  const parts: string[] = [];
+  for (const block of blocks) {
+    switch (block.type) {
+      case "text": {
+        if (block.label) {
+          parts.push(`--- ${block.label} ---\n${block.content}`);
+        } else {
+          parts.push(block.content);
+        }
+        break;
+      }
+      case "file": {
+        try {
+          const resolved = resolveBlockPath(block.path, promptBlocksDir);
+          const content = fs.readFileSync(resolved, "utf-8").trim();
+          if (content) {
+            const label = block.label || path.basename(block.path);
+            parts.push(`--- ${label} ---\n${content}`);
+          }
+        } catch {
+          // file not found or unreadable — skip silently
+        }
+        break;
+      }
+    }
+  }
+  return parts.join("\n\n");
+}
+
+/** Resolve a block file path: absolute/~/ → as-is, relative → from prompt_blocks dir */
+function resolveBlockPath(filePath: string, promptBlocksDir: string): string {
+  if (filePath.startsWith("~")) {
+    return path.join(os.homedir(), filePath.slice(1));
+  }
+  if (path.isAbsolute(filePath)) {
+    return filePath;
+  }
+  return path.join(promptBlocksDir, filePath);
+}
 
 export type PatrolConfig = {
   maxWorkers: number;
@@ -183,9 +311,193 @@ export class PatrolLoop {
 
     const tasks = db.queryQueuedTasks(this.db, available);
     for (const task of tasks) {
-      this.spawnAgentSession(task);
+      const subStepId = (task.sub_step_id as string) || "";
+      const bigStepRef = (task.big_step_ref as string) || "";
+
+      // 读取 YAML 配置，判断 kind
+      let subStep: SubStep | undefined;
+      let bigStep: BigStep | undefined;
+      try {
+        bigStep = loadBigStep(bigStepRef);
+        subStep = getSubStepConfig(bigStep, subStepId);
+      } catch { /* fallback to agent */ }
+
+      const kind = subStep?.kind ?? "agent";
+
+      if (kind === "shell") {
+        this.spawnShellSession(task, subStep!, bigStep!);
+      } else {
+        this.spawnAgentSession(task);
+      }
     }
   }
+
+  // ── 4a. Shell 执行 ─────────────────────────────────────────
+
+  private spawnShellSession(
+    task: Record<string, unknown>,
+    subStep: SubStep,
+    bigStep: BigStep,
+  ): void {
+    const runId = task.run_id as string;
+    const rawCommand = subStep.command;
+    if (!rawCommand?.trim()) {
+      db.updateTaskStatus(this.db, runId, "failed");
+      return;
+    }
+
+    const timeoutMs = (subStep.timeout_seconds ?? 300) * 1000;
+    const maxTokens = subStep.max_output_tokens ?? 0;
+    const overflowStrategy = subStep.overflow_strategy ?? "truncate";
+
+    // ── 解析上游 payload ──
+    let upstreamPayload: Record<string, unknown> = {};
+
+    // 1. inherit_payload：直接上游
+    if (subStep.inherit_payload) {
+      try {
+        upstreamPayload = JSON.parse((task.payload as string) || "{}");
+      } catch { /* keep empty */ }
+    }
+
+    // 2. payload_from：指定 step 的 payload（覆盖同名 key）
+    if (subStep.payload_from) {
+      const wfInstanceId = (task.workflow_instance_id as number) || 0;
+      const refPayload = db.getStepPayload(this.db, subStep.payload_from, wfInstanceId);
+      if (refPayload) {
+        Object.assign(upstreamPayload, refPayload);
+      }
+    }
+
+    // 3. 模板插值
+    const command = interpolateCommand(rawCommand, upstreamPayload, subStep.env ?? {});
+
+    try {
+      this.pool.acquire();
+
+      const proc = spawn(command, [], {
+        shell: true,
+        env: { ...process.env, ...subStep.env,
+          PATH: [
+            process.env.PATH || '/usr/bin:/bin',
+            '/usr/local/bin',
+            `${process.env.HOME}/bin`,
+            `${process.env.HOME}/.local/bin`,
+            '/opt/homebrew/bin',
+          ].join(':'),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      this.activeRuns.set(runId, proc);
+
+      const timer = setTimeout(() => {
+        try { proc.kill("SIGTERM"); } catch { /* gone */ }
+        setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* gone */ } }, 5000);
+      }, timeoutMs);
+
+      let stdout = "";
+      let stderr = "";
+
+      proc.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+      proc.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+      proc.on("close", (code) => {
+        clearTimeout(timer);
+        this.activeRuns.delete(runId);
+        this.pool.release();
+
+        // ── 第一步：判断基础状态 ──
+        const baseStatus = mapExitCode(code);
+        let status: string = baseStatus;
+        let finalStdout = stdout;
+        let overflowFlags: { truncated?: boolean; originalSize?: number; overflow?: boolean } = {};
+
+        if (baseStatus === "completed" && maxTokens > 0 && isStdoutOverflow(stdout, maxTokens)) {
+          const originalSize = stdout.length;
+
+          switch (overflowStrategy) {
+            case "workflow": {
+              this.db.prepare(
+                `UPDATE task_state SET previous_summary = ? WHERE run_id = ?`
+              ).run(buildOverflowSummary(stdout), runId);
+              status = "overflow";
+              finalStdout = truncateStdout(stdout, maxTokens);
+              overflowFlags = { overflow: true, originalSize };
+              break;
+            }
+            case "fail": {
+              status = "dropped";
+              overflowFlags = { overflow: true };
+              break;
+            }
+            default: {
+              // truncate
+              finalStdout = truncateStdout(stdout, maxTokens);
+              status = "completed";
+              overflowFlags = { truncated: true, originalSize };
+              break;
+            }
+          }
+        }
+
+        // ── 第二步：构建 payload（统一调一次）──
+        const { payload: finalPayload, overrideStatus } = buildStdoutPayload(finalStdout, {
+          payloadKeys: subStep.payload_keys,
+          payloadKeysOnError: subStep.payload_keys_on_error ?? "abort",
+          ...overflowFlags,
+        });
+
+        if (overrideStatus) {
+          status = overrideStatus;
+        }
+
+        // ── 写入 DB（shell 已同步处理 payload，直接标记 validated 跳过 patrol 验证）──
+        // Shell 不经过 validateCompleted()，直接进入 routeValidated() 路由
+        const dbStatus = status === "completed" ? "validated" : status;
+        db.updateTaskStatus(this.db, runId, dbStatus, { validation_status: "passed" });
+
+        // 同时更新 payload（updateTaskStatus 不写 payload）
+        this.db.prepare(
+          `UPDATE task_state SET payload = ? WHERE run_id = ?`
+        ).run(JSON.stringify(finalPayload), runId);
+
+        // ── 记录执行日志 ──
+        this.db.prepare(
+          `INSERT INTO commands_log
+           (run_id, workflow, step_id, command, shell, cwd, exit_code, stdout, stderr, duration_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+        ).run(
+          runId, task.workflow, task.sub_step_id, command,
+          "/bin/sh", process.cwd(), code ?? -1,
+          finalStdout.slice(0, 2000),
+          stderr.slice(0, 500),
+        );
+
+        console.log(
+          `[orchestrator-plugin] shell run ${runId} completed ` +
+          `(exit=${code}, status=${status})`,
+        );
+      });
+
+      proc.on("error", (err) => {
+        clearTimeout(timer);
+        this.activeRuns.delete(runId);
+        this.pool.release();
+        db.updateTaskStatus(this.db, runId, "failed");
+        console.error(`[orchestrator-plugin] shell spawn error for ${runId}:`, err.message);
+      });
+
+      db.updateTaskStatus(this.db, runId, "in_progress");
+      console.log(`[orchestrator-plugin] shell dispatched run ${runId} (step=${subStep.id})`);
+    } catch (err) {
+      try { this.pool.release(); } catch { /* already released */ }
+      db.updateTaskStatus(this.db, runId, "failed");
+      console.error(`[orchestrator-plugin] shell spawn exception for ${runId}:`, err);
+    }
+  }
+
+  // ── 4b. Agent 执行 ─────────────────────────────────────────
 
   private spawnAgentSession(task: Record<string, unknown>): void {
     const runId = task.run_id as string;
@@ -232,27 +544,45 @@ export class PatrolLoop {
     try {
       const bigStep = loadBigStep(bigStepRef);
       const subStep = getSubStepConfig(bigStep, subStepId);
-      if (subStep?.description) {
-        let desc = subStep.description;
-
-        // If inherit_payload, prepend previous step's data
-        if (subStep.inherit_payload) {
-          const payloadStr = (task.payload as string) || "{}";
-          try {
-            const prevPayload = JSON.parse(payloadStr);
-            if (Object.keys(prevPayload).length > 0) {
-              desc = `Previous step results:\n${JSON.stringify(prevPayload, null, 2)}\n\n${desc}`;
-            }
-          } catch { /* ignore parse errors */ }
-        }
-
-        return desc;
+      if (!subStep) {
+        return `Execute sub_step: ${subStepId}`;
       }
-    } catch {
-      // YAML not found, use default
-    }
 
-    return `Execute sub_step: ${subStepId}`;
+      const parts: string[] = [];
+
+      // ① inherit_payload: prepend upstream data
+      if (subStep.inherit_payload) {
+        const payloadStr = (task.payload as string) || "{}";
+        try {
+          const prevPayload = JSON.parse(payloadStr);
+          if (Object.keys(prevPayload).length > 0) {
+            parts.push(`Previous step results:\n${JSON.stringify(prevPayload, null, 2)}`);
+          }
+        } catch { /* ignore parse errors */ }
+      }
+
+      // ② prompt_blocks: render structured prompt (text + file)
+      if (subStep.prompt_blocks && subStep.prompt_blocks.length > 0) {
+        const rendered = renderPromptBlocks(subStep.prompt_blocks);
+        if (rendered) parts.push(rendered);
+      }
+
+      // ③ description: main task instruction
+      if (subStep.description) {
+        parts.push(subStep.description);
+      }
+
+      let desc = parts.join("\n\n");
+
+      // ④ KnowQL guide: append if enabled
+      if (subStep.allow_payload_query) {
+        desc = `${desc}\n\n${loadKnowQLGuide()}`;
+      }
+
+      return desc || `Execute sub_step: ${subStepId}`;
+    } catch {
+      return `Execute sub_step: ${subStepId}`;
+    }
   }
 
   // ── 5. 僵死检测 ─────────────────────────────────────────────
@@ -564,13 +894,17 @@ export class PatrolLoop {
           const firstSub = getFirstSubStep(bigStep);
           if (firstSub) {
             const newRunId = randomUUID();
+            // Respect inherit_payload across big_step boundary
+            const crossPayload = firstSub.inherit_payload
+              ? ((task.payload as string) || "{}")
+              : "{}";
             db.enqueueNextSubStep(this.db, {
               newRunId,
               workflow: comp.name,
               bigStepRef: nextRef,
               subStepId: firstSub.id,
               stepId: firstSub.id,
-              payload: "{}",
+              payload: crossPayload,
               workflowInstanceId: wfId,
               maxToolCalls: firstSub.max_tool_calls ?? 10,
               maxRetries: bigStep.max_retries ?? 0,

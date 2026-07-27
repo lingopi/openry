@@ -1,0 +1,17 @@
+# ============================================================================
+# shell_json_extract — 测试 payload_keys JSON 提取
+# ============================================================================
+name: shell_json_extract
+version: "1.0"
+description: "Phase 3b JSON 提取测试：payload_keys 从 stdout JSON 中提取指定字段"
+timeout_minutes: 1
+max_retries: 0
+
+sub_steps:
+  - id: step_json
+    kind: shell
+    command: "python3 /Users/yifan/Desktop/OpenRY/example/test_scripts/shell_json.py"
+    payload_keys: ["status", "count"]            # 只提取这两个 key
+    timeout_seconds: 10
+    on_success: done
+    on_failure: abort

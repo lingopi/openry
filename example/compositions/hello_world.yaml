@@ -1,0 +1,17 @@
+# ============================================================================
+# Hello World Composition — 最简单的 Composition 示例
+# ============================================================================
+# 演示：引用单个 Big Step 的 Composition
+#
+# 使用方法：
+#   openry-orchestrator start hello_world
+#   或通过 Dashboard 启动
+# ============================================================================
+name: hello_world
+version: "1.0"
+description: "最简单的 Composition：引用 hello_world workflow"
+
+big_steps:
+  - ref: hello_world        # 引用 workflows/hello_world.yaml
+    on_success: done
+    on_failure: abort

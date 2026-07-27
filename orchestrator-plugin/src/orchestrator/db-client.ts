@@ -302,3 +302,100 @@ export function retryOrFail(
   );
   return { retried: true, exhausted: false };
 }
+
+// ── KnowQL: payload 查询辅助 ─────────────────────────────────────
+
+/**
+ * 从 run_id 反查 workflow_instance_id。
+ * KnowQL 用此实现 instance="current" 的并发隔离。
+ */
+export function getWorkflowInstanceId(
+  db: Database.Database,
+  runId: string,
+): number | null {
+  const row = db
+    .prepare("SELECT workflow_instance_id FROM task_state WHERE run_id = ?")
+    .get(runId) as { workflow_instance_id: number | null } | undefined;
+  return row?.workflow_instance_id ?? null;
+}
+
+/**
+ * 从 run_id 反查 composition 名称。
+ */
+export function getCompositionForRun(
+  db: Database.Database,
+  runId: string,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT wi.composition
+       FROM task_state ts
+       JOIN workflow_instances wi ON ts.workflow_instance_id = wi.id
+       WHERE ts.run_id = ?`,
+    )
+    .get(runId) as { composition: string } | undefined;
+  return row?.composition ?? null;
+}
+
+/**
+ * 查询指定 step_id + workflow_instance_id 的 task_state 行。
+ */
+export function queryTaskByStepAndInstance(
+  db: Database.Database,
+  stepId: string,
+  workflowInstanceId: number,
+): Record<string, unknown> | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM task_state
+       WHERE step_id = ? AND workflow_instance_id = ?
+       ORDER BY updated_at DESC LIMIT 1`,
+    )
+    .get(stepId, workflowInstanceId) as Record<string, unknown> | undefined;
+}
+
+/**
+ * 查询当前 workflow_instance 内已完成的 step 列表（用于 discover runtime）。
+ */
+export function queryCompletedSteps(
+  db: Database.Database,
+  workflowInstanceId: number,
+  limit: number = 50,
+): Array<Record<string, unknown>> {
+  return db
+    .prepare(
+      `SELECT step_id, payload, status, completed_at
+       FROM task_state
+       WHERE workflow_instance_id = ?
+       ORDER BY created_at ASC
+       LIMIT ?`,
+    )
+    .all(workflowInstanceId, limit) as Array<Record<string, unknown>>;
+}
+
+// ── Phase 3b: shell payload_from ─────────────────────────────
+
+/**
+ * 按 step_id + workflow_instance_id 查询已完成 step 的 payload。
+ * 供 shell 模式的 payload_from 字段使用。
+ */
+export function getStepPayload(
+  db: Database.Database,
+  stepId: string,
+  workflowInstanceId: number,
+): Record<string, unknown> | null {
+  const row = db
+    .prepare(
+      `SELECT payload FROM task_state
+       WHERE sub_step_id = ? AND workflow_instance_id = ?
+         AND status IN ('done', 'validated', 'completed')
+       ORDER BY updated_at DESC LIMIT 1`,
+    )
+    .get(stepId, workflowInstanceId) as { payload: string } | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.payload) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}

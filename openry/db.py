@@ -206,6 +206,7 @@ _TASK_STATE_EXTENSION = [
     ("routing_target",         "TEXT"),
     ("on_output_overflow",     "TEXT"),
     ("previous_summary",       "TEXT"),
+    ("payload_schema",         "TEXT DEFAULT '{}'"),
 ]
 
 
@@ -417,6 +418,48 @@ def insert_validation_result(
     )
     conn.commit()
     conn.close()
+
+
+def generate_payload_schema(obj: dict, max_depth: int = 3, depth: int = 0) -> dict:
+    """递归遍历 payload dict，推断每个 key 的 JSON 类型。
+
+    在 cmd_status 写 payload 时同步调用，结果存入 payload_schema 列。
+    KnowQL describe_payload intent 直接读此列，O(1) 查询。
+    """
+    if depth >= max_depth:
+        return {"__truncated__": True}
+
+    schema = {}
+    for key, value in obj.items():
+        if value is None:
+            schema[key] = {"type": "null", "nullable": True}
+        elif isinstance(value, bool):
+            schema[key] = {"type": "boolean", "nullable": False}
+        elif isinstance(value, int):
+            schema[key] = {"type": "integer", "nullable": False}
+        elif isinstance(value, float):
+            schema[key] = {"type": "float", "nullable": False}
+        elif isinstance(value, str):
+            schema[key] = {
+                "type": "string",
+                "nullable": False,
+                "sample_length": len(value),
+            }
+        elif isinstance(value, list):
+            elem_types = list({type(v).__name__ for v in value})
+            schema[key] = {
+                "type": "array",
+                "nullable": False,
+                "sample_length": len(value),
+                "element_type": elem_types[0] if len(elem_types) == 1 else "mixed",
+            }
+        elif isinstance(value, dict):
+            schema[key] = {
+                "type": "object",
+                "nullable": False,
+                "children": generate_payload_schema(value, max_depth, depth + 1),
+            }
+    return schema
 
 
 def get_commands_history(run_id: str) -> list[dict]:

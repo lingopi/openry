@@ -49,6 +49,18 @@ function escapeShell(cmd: string): string {
 
 import { evaluateOpenryExecGate } from "./tools/trusted-policy.js";
 
+// ── KnowQL ────────────────────────────────────────────────────
+
+import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import { openDb, getDbPath, getWorkflowInstanceId, getCompositionForRun } from "./orchestrator/db-client.js";
+import { validateRequest, resetQueryCounter } from "./orchestrator/knowql/ast-validator.js";
+import { resolveQuery } from "./orchestrator/knowql/intent-resolver.js";
+import { executeQuery, type TopologyData } from "./orchestrator/knowql/query-executor.js";
+import { buildResponse, buildErrorResponse } from "./orchestrator/knowql/response-builder.js";
+import { loadComposition, loadBigStep, getSubStepConfig } from "./orchestrator/yaml-loader.js";
+
 // ── service ────────────────────────────────────────────────────
 
 import { createOrchestratorService } from "./orchestrator/service.js";
@@ -177,6 +189,108 @@ const plugin = {
       };
     });
 
+    // ── openry_payload_query (KnowQL) ──
+    api.registerTool((ctx: OpenClawPluginToolContext) => {
+      const { run_id } = parseSessionKey(ctx.sessionKey);
+
+      return {
+        name: "openry_payload_query",
+        label: "OpenRY Payload Query (KnowQL)",
+        description:
+          "Query historical step payload data along the knowledge graph. " +
+          "Use this to discover what previous steps produced and retrieve their full payloads.\n\n" +
+          "=== Discover ===\n" +
+          '{"discover":"runtime"} — list completed steps in current workflow (returns step_id + run_id + description)\n' +
+          '{"discover":"compositions"} — list all available workflow compositions\n' +
+          '{"discover":"big_step","ref":"<ref>"} — view sub-steps of a specific big_step\n\n' +
+          "=== Query Payload ===\n" +
+          '{"query":"payload","run_id":"<uuid>"} — exact lookup by run_id (preferred, from discover runtime)\n' +
+          '{"query":"payload","step_id":"<id>","composition":"<name>"} — conditional query (cross-composition)\n' +
+          '  Optional filters: time ("latest" or date), status (default done/abort), limit (default 3), contains (text search)\n\n' +
+          "=== Flow ===\n" +
+          "1. discover runtime → see completed steps + their run_ids\n" +
+          "2. query payload with run_id → get full payload",
+        parameters: Type.Object({
+          query: Type.Record(Type.String(), Type.Unknown(), {
+            description:
+              "KnowQL query object with discover or query field.",
+          }),
+        }),
+        async execute(_toolCallId: string, params: unknown) {
+          const { query } = params as { query: unknown };
+
+          try {
+            // ① Read YAML scope config for current step
+            let yamlScope: Record<string, unknown> | undefined;
+            try {
+              const dbPath = getDbPath(process.env.OPENRY_HOME ?? path.join(os.homedir(), ".openry"));
+              const db = openDb(dbPath);
+              const row = db.prepare(
+                "SELECT big_step_ref, sub_step_id FROM task_state WHERE run_id = ?"
+              ).get(run_id) as { big_step_ref: string; sub_step_id: string } | undefined;
+              if (row) {
+                const bigStep = loadBigStep(row.big_step_ref);
+                const subStep = getSubStepConfig(bigStep, row.sub_step_id);
+                if (subStep?.payload_query_scope) {
+                  yamlScope = subStep.payload_query_scope as unknown as Record<string, unknown>;
+                }
+              }
+              db.close();
+            } catch { /* YAML unavailable, use defaults */ }
+
+            // ② Validate request (with YAML scope if available)
+            const validated = validateRequest(query, {
+              sessionKey: ctx.sessionKey,
+              scope: yamlScope as any,
+            });
+
+            // ③ Open DB and resolve runtime context
+            const basePath = process.env.OPENRY_HOME ?? path.join(os.homedir(), ".openry");
+            const dbPath2 = getDbPath(basePath);
+            const db2 = openDb(dbPath2);
+
+            let workflowInstanceId: number | null = null;
+            let composition: string | null = null;
+
+            if (run_id !== "unknown") {
+              workflowInstanceId = getWorkflowInstanceId(db2, run_id);
+              composition = getCompositionForRun(db2, run_id);
+            }
+
+            if (!workflowInstanceId) {
+              db2.close();
+              return textResult(
+                buildErrorResponse("无法确定当前 workflow instance", "请确保在 OpenRY step 上下文中调用此工具"),
+                null,
+              );
+            }
+
+            // ④ Resolve query with runtime context
+            const resolved = resolveQuery(validated as any, {
+              currentWorkflowInstanceId: workflowInstanceId,
+              currentComposition: composition ?? "unknown",
+            });
+
+            // ⑤ Build topology from YAML
+            const topology = buildTopology(basePath);
+
+            // ⑥ Execute
+            const result = executeQuery(db2, resolved, topology);
+
+            db2.close();
+
+            return textResult(buildResponse(result), null);
+          } catch (err: unknown) {
+            if (err instanceof Error && err.name === "KnowQLValidationError") {
+              return textResult(buildErrorResponse(err.message), null);
+            }
+            const msg = err instanceof Error ? err.message : String(err);
+            return textResult(buildErrorResponse(`查询执行失败: ${msg}`), null);
+          }
+        },
+      };
+    });
+
     // ── trusted tool policy ──
     api.registerTrustedToolPolicy({
       id: "openry-exec-gate",
@@ -192,3 +306,113 @@ const plugin = {
 };
 
 export default definePluginEntry(plugin) as ReturnType<typeof definePluginEntry>;
+
+// ── KnowQL topology helpers ─────────────────────────────────────
+
+function buildTopology(basePath: string): TopologyData {
+  const compositions: import("./orchestrator/knowql/types.js").CompositionEntry[] = [];
+  const bigSteps: import("./orchestrator/knowql/types.js").BigStepEntry[] = [];
+  const subSteps: import("./orchestrator/knowql/types.js").SubStepEntry[] = [];
+
+  // Big Steps (workflows) — load first so composition builds can reference descriptions
+  const wfDir = path.join(basePath, "workflows");
+  const bigStepDescMap = new Map<string, string>();
+  if (fs.existsSync(wfDir)) {
+    for (const file of fs.readdirSync(wfDir)) {
+      if (!file.endsWith(".yaml") && !file.endsWith(".yml")) continue;
+      const ref = file.replace(/\.(yaml|yml)$/, "");
+      try {
+        const bigStep = loadBigStep(ref);
+        bigStepDescMap.set(ref, bigStep.description ?? "");
+        bigSteps.push({
+          ref,
+          name: bigStep.name ?? ref,
+          description: bigStep.description ?? "",
+          sub_step_ids: bigStep.sub_steps.map((ss) => ss.id),
+        } as import("./orchestrator/knowql/types.js").BigStepEntry);
+        // Sub-steps
+        for (const ss of bigStep.sub_steps) {
+          subSteps.push({
+            id: ss.id,
+            kind: ss.kind ?? "agent",
+            description: ss.description ?? "",
+            _big_step: ref,
+          } as any);
+        }
+      } catch {
+        bigSteps.push({ ref, name: ref, description: "", sub_step_ids: [] } as any);
+      }
+    }
+  }
+
+  // Compositions — with big_step refs + descriptions
+  const compDir = path.join(basePath, "compositions");
+  if (fs.existsSync(compDir)) {
+    for (const file of fs.readdirSync(compDir)) {
+      if (!file.endsWith(".yaml") && !file.endsWith(".yml")) continue;
+      const name = file.replace(/\.(yaml|yml)$/, "");
+      try {
+        const comp = loadComposition(name);
+        compositions.push({
+          name,
+          description: comp.description ?? "",
+          big_steps: comp.big_steps.map((bs) => ({
+            ref: bs.ref,
+            description: bigStepDescMap.get(bs.ref) ?? "",
+          })),
+        });
+
+        // Fix: 给属于当前 composition 的 big_step 标记 _composition
+        for (const bs of comp.big_steps) {
+          const entry = bigSteps.find((b) => b.ref === bs.ref);
+          if (entry) {
+            (entry as any)._composition = name;
+          }
+        }
+      } catch {
+        compositions.push({ name, description: "", big_steps: [] });
+      }
+    }
+  }
+
+  return { compositions, bigSteps, subSteps };
+}
+
+// Keep old helpers for backwards compatibility
+function listCompositions(basePath: string): string[] {
+  const compDir = path.join(basePath, "compositions");
+  if (!fs.existsSync(compDir)) return [];
+  return fs.readdirSync(compDir)
+    .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
+    .map((f) => f.replace(/\.(yaml|yml)$/, ""));
+}
+
+function buildBigStepMap(basePath: string): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  const compDir = path.join(basePath, "compositions");
+  if (!fs.existsSync(compDir)) return map;
+  for (const file of fs.readdirSync(compDir)) {
+    if (!file.endsWith(".yaml") && !file.endsWith(".yml")) continue;
+    const compName = file.replace(/\.(yaml|yml)$/, "");
+    try {
+      const comp = loadComposition(compName);
+      map.set(compName, comp.big_steps.map((bs) => bs.ref));
+    } catch { map.set(compName, []); }
+  }
+  return map;
+}
+
+function buildSubStepMap(basePath: string): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  const wfDir = path.join(basePath, "workflows");
+  if (!fs.existsSync(wfDir)) return map;
+  for (const file of fs.readdirSync(wfDir)) {
+    if (!file.endsWith(".yaml") && !file.endsWith(".yml")) continue;
+    const ref = file.replace(/\.(yaml|yml)$/, "");
+    try {
+      const bigStep = loadBigStep(ref);
+      map.set(ref, bigStep.sub_steps.map((ss) => ss.id));
+    } catch { map.set(ref, []); }
+  }
+  return map;
+}

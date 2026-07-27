@@ -1,0 +1,11 @@
+# ============================================================================
+# shell_test_overflow — 溢出策略测试合集
+# ============================================================================
+name: shell_test_overflow
+version: "1.0"
+description: "Phase 3b 溢出策略测试：truncate（截断） + fail（终止）"
+
+big_steps:
+  - ref: shell_overflow_truncate
+    on_success: shell_overflow_fail
+  - ref: shell_overflow_fail

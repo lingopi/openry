@@ -1,0 +1,78 @@
+# ============================================================================
+# Trusted Tool Policy — 安全策略示例
+# ============================================================================
+# 演示：配合 OpenClaw Gateway 的 Trusted Tool Policy
+#   - agent 只能使用 openry_run 和 openry_status 两个工具
+#   - 所有其他 tools（exec, read, write, browser 等）被拦截
+#   - 适合生产环境中对 agent 能力进行最小化约束
+#
+# 前置条件：
+#   1. OpenClaw Gateway 已配置 openry-worker agent
+#   2. agent tools profile 设为 minimal + alsoAllow: [openry_run, openry_status]
+#   3. 本 workflow 放入 ~/.openry/workflows/
+#
+# 使用方法：
+#   打开 Web Dashboard → 点击 + 号 → 选择 "trusted_tool_policy"
+# ============================================================================
+name: trusted_tool_policy
+version: "1.0"
+description: "验证 Trusted Tool Policy：只允许 openry_run + openry_status，其他 tools 全部拦截"
+timeout_minutes: 5
+max_retries: 1
+
+sub_steps:
+  # ── Step 1: 基础连通性 ──
+  - id: step_ping
+    kind: agent
+    description: >
+      这是一个 OpenRY workflow 测试。你只能使用 openry_run 和 openry_status 两个工具。
+      
+      请执行以下操作：
+      1. 先回复 "ping"，验证通信正常
+      2. 然后调用 openry_status，status 设为 "completed"，payload 设为 {"ping": "pong"}
+      
+      注意：不要尝试使用 exec, read, write 等工具，它们已被禁用。
+    on_success: step_shell
+    on_failure: abort
+    max_tool_calls: 3
+    expect_payload: true
+    payload_keys: ["ping"]
+
+  # ── Step 2: 验证 openry_run 执行命令 ──
+  - id: step_shell
+    kind: agent
+    description: >
+      继续测试。使用 openry_run 工具执行以下命令：
+      1. openry_run: echo "hello from openry"
+      2. openry_run: whoami
+      3. openry_run: pwd
+      
+      然后调用 openry_status，status 设为 "completed"，
+      payload 设为：
+      {"echo_result": "echo 的输出", "whoami": "whoami 的输出", "pwd": "pwd 的输出"}
+    on_success: step_edge
+    on_failure: abort
+    max_tool_calls: 10
+    inherit_payload: true
+    expect_payload: true
+    payload_keys: ["echo_result", "whoami", "pwd"]
+
+  # ── Step 3: 验证被拦截的 tool ──
+  - id: step_edge
+    kind: agent
+    description: >
+      最后一步测试。
+      
+      如果你能看到这段描述，说明前两个步骤都成功了。
+      
+      现在请尝试使用 exec 工具（不是 openry_run）执行 "echo blocked"。
+      exec 工具会被拦截。被拦截后，用 openry_run 执行同样的命令。
+      
+      最后调用 openry_status，status 设为 "completed"，
+      payload 设为 {"blocked": true, "note": "描述你被拦截时的经历"}
+    on_success: done
+    on_failure: abort
+    max_tool_calls: 5
+    inherit_payload: true
+    expect_payload: true
+    payload_keys: ["blocked", "note"]

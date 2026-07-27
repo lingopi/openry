@@ -1,0 +1,9 @@
+# ============================================================================
+# shell_test_payload_from — payload_from 跨步引用测试
+# ============================================================================
+name: shell_test_payload_from
+version: "1.0"
+description: "Phase 3b payload_from 测试：跳过中间 step，直引上游"
+
+big_steps:
+  - ref: shell_payload_from_ref

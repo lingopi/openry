@@ -1,0 +1,14 @@
+# ============================================================================
+# shell_test_chain — 串联测试：basic → json → interpolation
+# 验证 stdout全文 → JSON提取 → 模板插值 的完整链路
+# ============================================================================
+name: shell_test_chain
+version: "1.0"
+description: "Phase 3b Shell 链式测试：basic stdout → JSON payload_keys → template interpolation"
+
+big_steps:
+  - ref: shell_basic_stdout
+    on_success: shell_json_extract
+  - ref: shell_json_extract
+    on_success: shell_interpolation
+  - ref: shell_interpolation

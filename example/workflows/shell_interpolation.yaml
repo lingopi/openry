@@ -1,0 +1,25 @@
+# ============================================================================
+# shell_interpolation — 测试 ${payload.xxx} 和 ${env.VAR} 模板插值
+# ============================================================================
+name: shell_interpolation
+version: "1.0"
+description: "Phase 3b 模板插值测试：上游 payload 注入命令行；需要配合 composition 使用"
+timeout_minutes: 1
+max_retries: 0
+
+sub_steps:
+  # Step 1: 产出 payload（模拟上游 agent）
+  - id: step_producer
+    kind: shell
+    command: "python3 /Users/yifan/Desktop/OpenRY/example/test_scripts/shell_json.py"
+    payload_keys: ["status", "count"]
+    on_success: step_consumer
+
+  # Step 2: 消费 payload — 通过 ${payload.xxx} 模板插值
+  - id: step_consumer
+    kind: shell
+    command: "python3 /Users/yifan/Desktop/OpenRY/example/test_scripts/shell_interpolation.py --status ${payload.status} --count ${payload.count}"
+    inherit_payload: true                   # 继承 step_producer 的 payload
+    timeout_seconds: 10
+    on_success: done
+    on_failure: abort

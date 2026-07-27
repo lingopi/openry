@@ -1,0 +1,24 @@
+# ============================================================================
+# File Analysis Demo — 串联多个 Workflow 的 Composition 示例
+# ============================================================================
+# 演示：多个 Big Step 串行执行，演示 on_success / on_failure 路由
+#
+# 使用方法：
+#   openry-orchestrator start file_analysis_demo
+# ============================================================================
+name: file_analysis_demo
+version: "1.0"
+description: "文件分析流水线：打招呼 → 文件分析 → 权限验证"
+
+big_steps:
+  - ref: hello_world          # Step 1: 基础连通性
+    on_success: file_analysis  # 成功后进入文件分析
+    on_failure: abort
+
+  - ref: file_analysis         # Step 2: 文件操作与分析
+    on_success: permission_gate # 成功后进入权限验证
+    on_failure: abort
+
+  - ref: permission_gate       # Step 3: 权限门控
+    on_success: done           # 全部完成
+    on_failure: abort

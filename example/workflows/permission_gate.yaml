@@ -1,0 +1,46 @@
+# ============================================================================
+# Permission Gate — when_any OR 组条件路由示例
+# ============================================================================
+# 演示：validation_routing 中 when_any 多条件 OR 路由
+#   - role="admin" 或 role="editor" → 通过
+#   - 其他角色 → 拒绝
+#
+# 核心概念：when_any 组内任一条件满足即算该组通过
+# ============================================================================
+name: permission_gate
+version: "1.0"
+description: "演示 when_any OR 组路由：admin 或 editor 角色通过，其他拒绝"
+timeout_minutes: 5
+max_retries: 0
+
+sub_steps:
+  - id: check_permission
+    kind: agent
+    description: |
+      模拟权限检查流程：
+      1. 使用 openry_run 执行 'echo "checking permissions"'
+      2. 决定当前角色 role 值（可选：admin, editor, viewer, guest）
+      3. 使用 openry_status 上报 completed，payload 含 role 字段
+
+      系统会根据 role 值自动判断权限：
+      - admin 或 editor → 通过
+      - 其他角色 → 拒绝
+    on_success: done
+    on_failure: abort
+    max_tool_calls: 5
+    max_sub_step_retries: 2
+    expect_payload: true
+    payload_keys: [role]
+    on_validation_fail: retry_current
+
+    validation_routing:
+      - when_any:
+          - type: payload_value_equals
+            key: role
+            value: "admin"
+          - type: payload_value_equals
+            key: role
+            value: "editor"
+        on_match: done           # admin 或 editor → 通过
+        on_mismatch: abort       # 其他角色 → 拒绝
+        on_mismatch_message: "权限不足：需要 admin 或 editor 角色"

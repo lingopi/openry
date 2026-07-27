@@ -1,0 +1,19 @@
+# ============================================================================
+# shell_env_interpolation — 测试 ${env.VAR} 环境变量插值
+# ============================================================================
+name: shell_env_interpolation
+version: "1.0"
+description: "Phase 3b env 插值测试：${env.VAR} 注入命令行"
+timeout_minutes: 1
+max_retries: 0
+
+sub_steps:
+  - id: step_env
+    kind: shell
+    command: "echo 'Token: ${env.TEST_TOKEN}' && echo 'Greeting: ${env.TEST_GREETING}'"
+    env:
+      TEST_TOKEN: "sk-test-12345"
+      TEST_GREETING: "hello from env"
+    timeout_seconds: 5
+    on_success: done
+    on_failure: abort

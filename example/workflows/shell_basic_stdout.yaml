@@ -1,0 +1,16 @@
+# ============================================================================
+# shell_basic_stdout — 测试最基础的 stdout → _stdout payload
+# ============================================================================
+name: shell_basic_stdout
+version: "1.0"
+description: "Phase 3b 基础测试：shell stdout 全文作为 _stdout payload"
+timeout_minutes: 1
+max_retries: 0
+
+sub_steps:
+  - id: step_basic
+    kind: shell
+    command: "python3 /Users/yifan/Desktop/OpenRY/example/test_scripts/shell_basic.py"
+    timeout_seconds: 10
+    on_success: done
+    on_failure: abort

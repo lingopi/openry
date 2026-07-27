@@ -1,0 +1,34 @@
+# ============================================================================
+# Basic Validation — 硬验证规则示例
+# ============================================================================
+# 演示：expect_payload + payload_keys 硬验证
+#   - agent 必须携带 --payload 参数
+#   - payload 必须包含指定 key 列表
+#   - 验证失败时触发 retry_current
+#
+# 核心概念：硬验证是执行条件路由之前的先决检查
+# ============================================================================
+name: basic_validation
+version: "1.0"
+description: "演示 expect_payload + payload_keys 硬验证机制"
+timeout_minutes: 5
+max_retries: 0
+
+sub_steps:
+  - id: report_result
+    kind: agent
+    description: |
+      执行以下操作：
+      1. 使用 openry_run 执行命令 'echo "validation test OK"'
+      2. 使用 openry_status 上报 status=completed，payload 必须包含：
+         - test_name: "basic_validation"
+         - result: "pass"
+      
+      注意：如果缺少任一字段，验证会失败并提示你重新提交。
+    on_success: done
+    on_failure: abort
+    max_tool_calls: 5
+    max_sub_step_retries: 2
+    expect_payload: true          # 必须携带 --payload
+    payload_keys: [test_name, result]  # payload 必须包含这两个 key
+    on_validation_fail: retry_current   # 验证失败 → 重试当前步骤

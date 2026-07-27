@@ -1,0 +1,26 @@
+# ============================================================================
+# shell_json_fallback — 测试 payload_keys_on_error: fallback 降级
+# ============================================================================
+name: shell_json_fallback
+version: "1.0"
+description: "Phase 3b JSON 降级测试：非 JSON 输出时回退到 _stdout"
+timeout_minutes: 1
+max_retries: 0
+
+sub_steps:
+  - id: step_json_ok
+    kind: shell
+    command: "python3 /Users/yifan/Desktop/OpenRY/example/test_scripts/shell_maybe_json.py json"
+    payload_keys: ["result", "value"]
+    payload_keys_on_error: fallback
+    timeout_seconds: 10
+    on_success: step_json_bad
+
+  - id: step_json_bad
+    kind: shell
+    command: "python3 /Users/yifan/Desktop/OpenRY/example/test_scripts/shell_maybe_json.py text"
+    payload_keys: ["result", "value"]
+    payload_keys_on_error: fallback          # 非 JSON → 降级为 _stdout，不报错
+    timeout_seconds: 10
+    on_success: done
+    on_failure: abort

@@ -24,6 +24,11 @@ export type ValidationRoutingEntry = {
   on_mismatch_message?: string;
 };
 
+// Phase 3b: prompt_blocks
+export type PromptBlock =
+  | { type: "text"; content: string; label?: string }
+  | { type: "file"; path: string; label?: string };
+
 export type SubStep = {
   id: string;
   kind?: string;
@@ -43,6 +48,23 @@ export type SubStep = {
   // Phase 3a
   on_payload_missing?: string;
   validation_routing?: ValidationRoutingEntry[];
+  // Phase 3b: prompt_blocks
+  prompt_blocks?: PromptBlock[];
+  // Phase 3b: KnowQL
+  allow_payload_query?: boolean;
+  payload_query_scope?: {
+    compositions?: string | string[];
+    max_queries?: number;
+    allow_search?: boolean;
+    allowed_intents?: string[];
+  };
+  // Phase 3b: kind=shell
+  command?: string;
+  timeout_seconds?: number;
+  env?: Record<string, string>;
+  overflow_strategy?: "truncate" | "workflow" | "fail";
+  payload_keys_on_error?: "abort" | "fallback";
+  payload_from?: string;
 };
 
 export type Composition = {
@@ -82,7 +104,38 @@ export function loadComposition(name: string): Composition {
   if (!fs.existsSync(yamlPath)) {
     throw new Error(`Composition not found: ${yamlPath}`);
   }
-  return yaml.load(fs.readFileSync(yamlPath, "utf-8")) as Composition;
+  const comp = yaml.load(fs.readFileSync(yamlPath, "utf-8")) as Composition;
+
+  // Phase 3b: 验证 step_id 在 composition 内全局唯一
+  validateStepIdUniqueness(comp);
+
+  return comp;
+}
+
+/**
+ * 验证 composition 内所有 big_step 的 sub_step.id 全局唯一。
+ * KnowQL 依赖此约束实现跨 big_step 直接用 step_id 定位。
+ */
+function validateStepIdUniqueness(comp: Composition): void {
+  const seen = new Map<string, string>(); // step_id → big_step_ref
+  for (const bs of comp.big_steps) {
+    let bigStep: BigStep;
+    try {
+      bigStep = loadBigStep(bs.ref);
+    } catch {
+      continue; // 无法加载的 big_step 跳过（loadBigStep 会抛异常）
+    }
+    for (const ss of bigStep.sub_steps) {
+      if (seen.has(ss.id)) {
+        throw new Error(
+          `Step ID "${ss.id}" 在 composition "${comp.name}" 中重复：` +
+          `big_step "${seen.get(ss.id)}" 和 "${bs.ref}" 都定义了此 ID。` +
+          `KnowQL 要求 composition 内 step_id 全局唯一。`,
+        );
+      }
+      seen.set(ss.id, bs.ref);
+    }
+  }
 }
 
 export function getSubStepConfig(

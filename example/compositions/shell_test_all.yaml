@@ -1,0 +1,24 @@
+# ============================================================================
+# shell_test_all — Shell 功能测试（非终态串行，drop 型测试在最后独立）
+# ============================================================================
+name: shell_test_all
+version: "1.0"
+description: "Phase 3b Shell 全功能测试：1-7 连续跑，8-9(drop型)放最后独立验证"
+
+big_steps:
+  - ref: shell_basic_stdout
+    on_success: shell_json_extract
+  - ref: shell_json_extract
+    on_success: shell_json_fallback
+  - ref: shell_json_fallback
+    on_success: shell_interpolation
+  - ref: shell_interpolation
+    on_success: shell_payload_from_ref
+  - ref: shell_payload_from_ref
+    on_success: shell_env_interpolation
+  - ref: shell_env_interpolation
+    on_success: shell_overflow_truncate
+  - ref: shell_overflow_truncate
+    on_success: shell_overflow_fail
+  - ref: shell_overflow_fail
+  - ref: shell_json_abort

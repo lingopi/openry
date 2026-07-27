@@ -1,0 +1,84 @@
+# ============================================================================
+# Conditional Routing Demo — 完整条件路由 Workflow 示例
+# ============================================================================
+# 演示：单条 workflow 中 when + when_any 组合使用
+#   - 硬验证（payload_keys）
+#   - when 条件路由
+#   - when_any OR 组路由
+#   - 多类型验证规则（payload_value_equals, payload_type, payload_value_in_set 等）
+#
+# 这是一个独立的 Big Step，可以通过 Composition 引用或直接作为 workflow 启动。
+# ============================================================================
+name: conditional_routing_demo
+version: "1.0"
+description: "演示完整条件路由：硬验证 → when → when_any → 类型检查"
+timeout_minutes: 10
+max_retries: 0
+
+sub_steps:
+  # ── Step 1: 多类型验证 + 条件路由链 ──
+  - id: validate_and_route
+    kind: agent
+    description: >
+      请提交一个包含以下字段的 payload：
+      - status: "active"
+      - category: "safe"（或 "neutral"）
+      - count: 一个大于 0 且小于 100 的整数
+      - score: 整数类型
+      - email: 合法 email 格式（含 @）
+      - is_admin: true 或 false
+      - role: "editor"（或 "viewer"）
+      
+      调用：openry --status completed --payload '{...}'
+    on_success: done
+    on_failure: abort
+    max_sub_step_retries: 3
+    expect_payload: true
+    payload_keys: [status, category, count, score, email, is_admin, role]
+    on_validation_fail: retry_current
+
+    # 硬验证规则：先确保数据正确
+    validation:
+      - type: payload_value_equals
+        key: status
+        value: "active"
+      - type: payload_value_in_set
+        key: category
+        values: ["safe", "neutral"]
+        mode: allow
+      - type: payload_value_greater_than
+        key: count
+        threshold: 0
+      - type: payload_value_less_than
+        key: count
+        threshold: 100
+      - type: payload_type
+        key: score
+        expected_type: int
+      - type: payload_value_matches
+        key: email
+        regex: "^[^@]+@[^@]+\\.[^@]+$"
+
+    # 条件路由：硬验证通过后执行
+    validation_routing:
+      # 条目 1: 单条件 when — category 检查
+      - when:
+          type: payload_value_equals
+          key: category
+          value: "safe"
+        on_match: continue          # 通过，继续下一条
+        on_mismatch: abort          # 不通过，终止
+        on_mismatch_message: "category 不是 safe"
+
+      # 条目 2: when_any OR 组 — 权限检查
+      - when_any:
+          - type: payload_value_equals
+            key: is_admin
+            value: true
+          - type: payload_value_in_set
+            key: role
+            values: ["editor", "reviewer"]
+            mode: allow
+        on_match: done              # 任一条件满足 → 完成
+        on_mismatch: abort          # 都不满足 → 终止
+        on_mismatch_message: "权限不足"

@@ -1,0 +1,39 @@
+# ============================================================================
+# Hello World — 最简单的 OpenRY Workflow 示例
+# ============================================================================
+# 演示：基本 sub_step、payload_keys、inherit_payload
+#
+# 使用方法：
+#   1. 放入 ~/.openry/workflows/ 目录
+#   2. 通过 Dashboard 或 Composition 引用 "hello_world" 启动
+# ============================================================================
+name: hello_world
+version: "1.0"
+description: "最简单的 OpenRY workflow 示例：打招呼 → 执行命令 → 上报结果"
+timeout_minutes: 5
+max_retries: 1
+
+sub_steps:
+  # ── Step 1: 基础连通性验证 ──
+  - id: step_greet
+    kind: agent
+    description: >
+      这是一个 OpenRY workflow 测试。请回复一句问候语，然后调用 openry_status，
+      status 设为 "completed"。不需要执行任何命令。
+    on_success: step_execute
+    on_failure: abort
+    max_tool_calls: 5
+
+  # ── Step 2: 执行命令 + 上报 payload ──
+  - id: step_execute
+    kind: agent
+    description: >
+      使用 openry_run 执行 'date' 命令，然后调用 openry_status，
+      status 设为 "completed"，payload 格式：
+      {"date": "粘贴 date 命令的输出"}
+    on_success: done
+    on_failure: abort
+    max_tool_calls: 5
+    expect_payload: true
+    payload_keys: ["date"]
+    inherit_payload: true

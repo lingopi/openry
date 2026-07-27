@@ -161,8 +161,35 @@ fi
 
 mkdir -p "$OPENRY_HOME/workflows"
 mkdir -p "$OPENRY_HOME/compositions"
-echo -e "  ${GREEN}✓${NC} Initialized ${CYAN}${OPENRY_HOME}${NC} (workflows/ + compositions/)"
+mkdir -p "$OPENRY_HOME/prompts"
+mkdir -p "$OPENRY_HOME/prompt_blocks"
+echo -e "  ${GREEN}✓${NC} Initialized ${CYAN}${OPENRY_HOME}${NC} (workflows/ + compositions/ + prompts/ + prompt_blocks/)"
 echo ""
+
+# ── 8.5. Copy example YAMLs ──────────────────────────────────────────────
+
+EXAMPLE_DIR="${SCRIPT_DIR}/example"
+if [ -d "$EXAMPLE_DIR" ]; then
+    echo -e "  Installing example workflows & compositions..."
+    if [ -d "$EXAMPLE_DIR/workflows" ]; then
+        cp -n "$EXAMPLE_DIR/workflows/"*.yaml "$OPENRY_HOME/workflows/" 2>/dev/null || true
+    fi
+    if [ -d "$EXAMPLE_DIR/compositions" ]; then
+        cp -n "$EXAMPLE_DIR/compositions/"*.yaml "$OPENRY_HOME/compositions/" 2>/dev/null || true
+    fi
+    echo -e "  ${GREEN}✓${NC} Example YAMLs copied to ${CYAN}${OPENRY_HOME}${NC}"
+    echo ""
+fi
+
+# ── 8.6. Copy prompts ────────────────────────────────────────────────────
+
+PROMPTS_DIR="${SCRIPT_DIR}/prompts"
+if [ -d "$PROMPTS_DIR" ]; then
+    echo -e "  Installing agent prompts..."
+    cp -n "$PROMPTS_DIR/"*.md "$OPENRY_HOME/prompts/" 2>/dev/null || true
+    echo -e "  ${GREEN}✓${NC} Prompts copied to ${CYAN}${OPENRY_HOME}/prompts/${NC} (knowql-agent-prompt.md, compositions-and-workflows-guide.md)"
+    echo ""
+fi
 
 # ── 9. Verify ────────────────────────────────────────────────────────────
 
@@ -282,5 +309,7 @@ echo "    openry -c 'echo hello'"
 echo ""
 echo "  Workflows:    ${OPENRY_HOME}/workflows/"
 echo "  Compositions: ${OPENRY_HOME}/compositions/"
+echo "  Prompts:      ${OPENRY_HOME}/prompts/"
+echo "  Prompt Blocks:${OPENRY_HOME}/prompt_blocks/"
 echo "  Database:     ${OPENRY_HOME}/openry.db  (auto-created on first use)"
 echo ""

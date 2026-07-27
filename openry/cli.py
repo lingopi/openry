@@ -537,7 +537,7 @@ def cmd_status(args: argparse.Namespace) -> None:
       BEGIN IMMEDIATE transaction, preventing parallel calls from racing.
     - Session termination happens AFTER COMMIT (outside the lock).
     """
-    from .db import set_output_overflow, _get_conn
+    from .db import set_output_overflow, _get_conn, generate_payload_schema
 
     status = args.status
     valid_statuses = ("completed", "failed", "cancelled", "overflow")
@@ -618,16 +618,21 @@ def cmd_status(args: argparse.Namespace) -> None:
         # ── Handle each status within the same transaction ──
 
         if status == "completed":
-            # Write completed + payload
+            # 自动生成 payload_schema
+            payload_schema = generate_payload_schema(payload_dict) if payload_dict else {}
+            payload_schema_str = json.dumps(payload_schema, ensure_ascii=False)
+
+            # Write completed + payload + schema
             conn.execute(
                 """UPDATE task_state
                    SET workflow = COALESCE(?, workflow),
                        step_id  = COALESCE(?, step_id),
                        status   = 'completed',
                        payload  = ?,
+                       payload_schema = ?,
                        updated_at = datetime('now')
                    WHERE run_id = ?""",
-                (workflow, step_id, payload_str, run_id),
+                (workflow, step_id, payload_str, payload_schema_str, run_id),
             )
 
             # Sync validation

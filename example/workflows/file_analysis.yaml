@@ -1,0 +1,58 @@
+# ============================================================================
+# File Analysis — 多步骤文件操作 Workflow 示例
+# ============================================================================
+# 演示：多 sub_step 串联、inherit_payload 传递上下文、长 agent session
+#
+# 使用方法：
+#   openclaw agent --agent openry-worker --message "start file_analysis workflow"
+# ============================================================================
+name: file_analysis
+version: "1.0"
+description: "多步骤文件探索、创建、修改与分析，演示 payload 在步骤间传递"
+timeout_minutes: 10
+max_retries: 1
+
+sub_steps:
+  # ── Step 1: 探索环境 + 创建文件 ──
+  - id: step_explore
+    kind: agent
+    description: |
+      请完成以下文件探索与分析任务，每步都使用 openry_run 执行命令：
+
+      1. 用 'ls -la' 查看当前目录下有哪些文件
+      2. 用 'pwd' 确认当前工作目录
+      3. 创建文件 /tmp/openry_demo_report.txt，写入：
+         "OpenRY Demo Report\n==================\nDate: RUNNING\nStatus: IN PROGRESS\n"
+      4. 用 'cat' 读取刚创建的文件确认内容正确
+      5. 用 'wc -l' 统计该文件的行数
+      6. 用 'grep' 搜索 "Status" 关键词
+      7. 将以上结果整理成 summary，通过 openry_status completed 上报：
+         {"summary": "整理后的文字摘要", "line_count": 行数, "file_exists": true}
+
+      重要：每一步都要用 openry_run 执行！
+    on_success: step_modify
+    on_failure: abort
+    max_tool_calls: 15
+    expect_payload: true
+    payload_keys: ["summary", "line_count", "file_exists"]
+
+  # ── Step 2: 修改文件 + 验证（继承上一步 payload）──
+  - id: step_modify
+    kind: agent
+    description: |
+      在上一步创建的文件基础上继续操作：
+
+      1. 用 'date' 获取当前时间
+      2. 追加内容到 /tmp/openry_demo_report.txt：
+         "Completed at: (粘贴 date 输出)"
+         "Final Status: SUCCESS"
+      3. 用 'cat' 确认文件更新后的完整内容
+      4. 用 'wc -l' 确认行数增加了
+      5. 通过 openry_status completed 上报：
+         {"final_content": "cat 的完整输出", "final_lines": 总行数, "status": "SUCCESS"}
+    on_success: done
+    on_failure: abort
+    max_tool_calls: 10
+    expect_payload: true
+    payload_keys: ["final_content", "final_lines", "status"]
+    inherit_payload: true   # 继承 step_explore 的 payload
