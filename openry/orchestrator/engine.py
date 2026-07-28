@@ -644,7 +644,7 @@ class Orchestrator:
             on_failure = step_config.get("on_failure", "abort")
 
             # ── retry ──
-            if on_failure == "retry" and sub_retry < max_sub:
+            if on_failure == "retry" and sub_retry + 1 < max_sub:
                 update_task_status(
                     run_id, "queued",
                     sub_step_retry_count=sub_retry + 1,
@@ -709,7 +709,7 @@ class Orchestrator:
             update_task_status(run_id, "failed", validation_status="failed")
             return
 
-        if retry_count >= max_retries:
+        if retry_count + 1 >= max_retries:
             print(
                 f"[orchestrator] Phase 3a: {run_id} retry budget exhausted "
                 f"({retry_count}/{max_retries}): {reason}"

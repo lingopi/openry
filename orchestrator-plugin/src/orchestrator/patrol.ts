@@ -770,7 +770,7 @@ export class PatrolLoop {
             (ss?.max_sub_step_retries as number) ||
             (task.max_sub_step_retries as number) ||
             3;
-          if (retryCount >= maxRetries) {
+          if (retryCount + 1 >= maxRetries) {
             console.log(
               `[orchestrator-plugin] ${runId} validation retry budget exhausted ` +
               `(${retryCount}/${maxRetries})`,

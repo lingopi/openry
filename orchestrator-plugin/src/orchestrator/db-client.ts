@@ -334,7 +334,7 @@ export function retryOrFail(
 
   const retryCount = row?.sub_step_retry_count ?? 0;
 
-  if (retryCount >= maxRetries) {
+  if (retryCount + 1 >= maxRetries) {
     // Budget exhausted → permanently failed
     db.prepare(
       `UPDATE task_state

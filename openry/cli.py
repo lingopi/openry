@@ -362,7 +362,7 @@ def _handle_failed_retry(run_id: str, step_config: dict, retry_count: int, conn)
     on_failure = step_config.get("on_failure", "abort")
     max_retries = step_config.get("max_sub_step_retries", 0) or 0
 
-    if on_failure == "retry" and max_retries > 0 and retry_count < max_retries:
+    if on_failure == "retry" and max_retries > 0 and retry_count + 1 < max_retries:
         new_count = retry_count + 1
         conn.execute(
             """UPDATE task_state
@@ -671,7 +671,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                     elif routing_target == "retry_current":
                         new_count = db_retry_count + 1
                         max_retries = step_config.get("max_sub_step_retries", db_max_sub_retries or 3)
-                        if new_count <= max_retries:
+                        if new_count < max_retries:
                             conn.execute(
                                 "UPDATE task_state SET status = 'in_progress',"
                                 " sub_step_retry_count = ?, validation_status = 'failed',"
@@ -726,7 +726,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                 on_vfail = step_config.get("on_validation_fail", db_on_vfail or "retry_current")
                 max_retries = step_config.get("max_sub_step_retries", db_max_sub_retries or 3)
 
-                if on_vfail == "retry_current" and db_retry_count < max_retries:
+                if on_vfail == "retry_current" and db_retry_count + 1 < max_retries:
                     new_count = db_retry_count + 1
                     conn.execute(
                         """UPDATE task_state
