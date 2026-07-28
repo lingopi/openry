@@ -41,7 +41,8 @@ export type SubStep = {
   expect_payload?: boolean;
   payload_keys?: string[];
   inherit_payload?: boolean;
-  command_policy?: unknown;
+  // Phase 3c: command_policy supports named presets, file references, or inline config
+  command_policy?: string | CommandPolicyObject;
   validation?: unknown[];
   on_validation_fail?: string;
   on_output_overflow?: string;
@@ -65,6 +66,31 @@ export type SubStep = {
   overflow_strategy?: "truncate" | "workflow" | "fail";
   payload_keys_on_error?: "abort" | "fallback";
   payload_from?: string;
+};
+
+// ── Phase 3c: command_policy types ─────────────────────────────
+
+export type CommandPolicyObject = {
+  mode: "unrestricted" | "allowlist" | "blocklist";
+  commands?: string[];
+  patterns?: PatternRule[];
+  params?: ParamRule[];
+};
+
+export type PatternRule = {
+  regex: string;
+  description: string;
+};
+
+export type ParamRule = {
+  command: string;
+  allowed_flags?: string[];
+  blocked_flags?: string[];
+  blocked_flag_patterns?: string[];
+  allowed_subcommands?: string[];
+  blocked_subcommands?: string[];
+  allowed_scripts?: string[];
+  blocked_scripts?: string[];
 };
 
 export type Composition = {

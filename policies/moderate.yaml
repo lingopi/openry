@@ -1,0 +1,88 @@
+# OpenRY — moderate 策略（内置）
+# 包含：仅极危险命令拦截
+# 适用：内部开发环境、可信 workflow
+# 用法：在 workflow YAML 中设置 command_policy: moderate
+
+mode: blocklist
+
+# ── 命令名级别 ──
+commands:
+  - mkfs
+  - dd
+  - shutdown
+  - reboot
+  - halt
+  - poweroff
+  - init
+  - telinit
+  - diskutil
+  - format
+  - diskpart
+
+# ── 正则模式（仅极危险）──
+patterns:
+  # ▸ 文件系统破坏
+  - regex: "^rm\\s+-rf\\s+/\\s*$"
+    description: "禁止 rm -rf / (Unix)"
+  - regex: "^rm\\s+-rf\\s+~"
+    description: "禁止 rm -rf ~ (Unix)"
+  - regex: "^rm\\s+-rf\\s+\\$HOME"
+    description: "禁止 rm -rf $HOME (Unix)"
+  - regex: "^mkfs\\."
+    description: "禁止格式化磁盘 (Unix)"
+  - regex: "dd\\s+.*of=/dev/"
+    description: "禁止覆写块设备 (Unix)"
+  - regex: ">\\s*/dev/sd[a-z]"
+    description: "禁止重定向覆盖磁盘 (Linux)"
+  - regex: ">\\s*/dev/disk[0-9]"
+    description: "禁止重定向覆盖磁盘 (macOS)"
+  - regex: ">\\s*/dev/nvme"
+    description: "禁止重定向覆盖 NVMe (Unix)"
+  - regex: "diskutil\\s+eraseDisk"
+    description: "禁止 macOS 格式化磁盘"
+  - regex: "diskutil\\s+partitionDisk"
+    description: "禁止 macOS 重新分区"
+
+  # ▸ 系统关机
+  - regex: "^(shutdown|reboot|halt|poweroff)\\b"
+    description: "禁止关机/重启 (Unix)"
+  - regex: "^init\\s+[06]"
+    description: "禁止切换运行级别 (Linux)"
+  - regex: "^telinit\\s"
+    description: "禁止 telinit (Linux)"
+
+  # ▸ fork bomb
+  - regex: ":\\(\\).*:\\|:.*"
+    description: "禁止 fork bomb (Unix)"
+
+  # ▸ 全系统权限破坏
+  - regex: "chmod\\s+-R\\s+777\\s+/"
+    description: "禁止全系统权限设置为 777"
+
+  # ▸ Windows 磁盘操作
+  - regex: "^format\\s+[A-Z]:"
+    description: "禁止格式化磁盘 (Windows CMD)"
+  - regex: "^Format-Volume\\s+-DriveLetter"
+    description: "禁止格式化卷 (Windows PowerShell)"
+  - regex: "^Clear-Disk\\s"
+    description: "禁止清除磁盘 (Windows PowerShell)"
+  - regex: "^Initialize-Disk\\s"
+    description: "禁止初始化磁盘 (Windows PowerShell)"
+  - regex: "^diskpart\\s+/s\\s+.*clean"
+    description: "禁止 diskpart clean 脚本 (Windows)"
+
+  # ▸ Windows 关机
+  - regex: "^shutdown\\s+/[sr]"
+    description: "禁止关机/重启 (Windows CMD)"
+  - regex: "^(Stop-Computer|Restart-Computer)\\b"
+    description: "禁止关机/重启 (Windows PowerShell)"
+
+  # ▸ Windows 递归删除根
+  - regex: "^del\\s+/f\\s+/s\\s+/q\\s+[A-Z]:\\\\"
+    description: "禁止递归删除盘符 (Windows CMD)"
+  - regex: "^Remove-Item\\s+-Recurse\\s+-Force\\s+[A-Z]:\\\\"
+    description: "禁止递归删除盘符 (Windows PowerShell)"
+  - regex: "^rmdir\\s+/s\\s+/q\\s+[A-Z]:\\\\"
+    description: "禁止递归删除盘符 (Windows CMD)"
+  - regex: "^rd\\s+/s\\s+/q\\s+[A-Z]:\\\\"
+    description: "禁止递归删除盘符 (Windows CMD)"

@@ -1,0 +1,199 @@
+# OpenRY — strict 策略（内置）
+# 包含：极危险 + 高危险 命令全部拦截
+# 适用：生产环境、面向外部用户的 workflow
+# 用法：在 workflow YAML 中设置 command_policy: strict
+
+mode: blocklist
+
+# ── 命令名级别 ──
+commands:
+  - rm
+  - sudo
+  - mkfs
+  - dd
+  - shutdown
+  - reboot
+  - halt
+  - poweroff
+  - init
+  - telinit
+  - diskutil
+  - iptables
+  - nft
+  - ufw
+  - crontab
+  - eval
+  - source
+  - format
+  - diskpart
+  - reg
+  - sc
+  - wevtutil
+
+# ── 正则模式 ──
+patterns:
+  # ▸ 极危险：文件系统破坏
+  - regex: "^rm\\s+-rf\\s+/\\s*$"
+    description: "禁止 rm -rf / (Unix)"
+  - regex: "^rm\\s+-rf\\s+~"
+    description: "禁止 rm -rf ~ (Unix)"
+  - regex: "^rm\\s+-rf\\s+\\$HOME"
+    description: "禁止 rm -rf $HOME (Unix)"
+  - regex: "^mkfs\\."
+    description: "禁止格式化磁盘 (Unix)"
+  - regex: "dd\\s+.*of=/dev/"
+    description: "禁止覆写块设备 (Unix)"
+  - regex: ">\\s*/dev/sd[a-z]"
+    description: "禁止重定向覆盖磁盘 (Linux)"
+  - regex: ">\\s*/dev/disk[0-9]"
+    description: "禁止重定向覆盖磁盘 (macOS)"
+  - regex: ">\\s*/dev/nvme"
+    description: "禁止重定向覆盖 NVMe (Unix)"
+  - regex: "diskutil\\s+eraseDisk"
+    description: "禁止 macOS 格式化磁盘"
+  - regex: "diskutil\\s+partitionDisk"
+    description: "禁止 macOS 重新分区"
+
+  # ▸ 极危险：系统关机
+  - regex: "^(shutdown|reboot|halt|poweroff)\\b"
+    description: "禁止关机/重启 (Unix)"
+  - regex: "^init\\s+[06]"
+    description: "禁止切换运行级别 (Linux)"
+  - regex: "^telinit\\s"
+    description: "禁止 telinit (Linux)"
+  - regex: "^kill\\s+-9\\s+1$"
+    description: "禁止杀死 PID 1 (Linux)"
+
+  # ▸ 极危险：fork bomb
+  - regex: ":\\(\\).*:\\|:.*"
+    description: "禁止 fork bomb (Unix)"
+
+  # ▸ 极危险：全系统权限破坏
+  - regex: "chmod\\s+-R\\s+777\\s+/"
+    description: "禁止全系统权限设置为 777"
+
+  # ▸ 极危险：Windows 磁盘操作
+  - regex: "^format\\s+[A-Z]:"
+    description: "禁止格式化磁盘 (Windows CMD)"
+  - regex: "^Format-Volume\\s+-DriveLetter"
+    description: "禁止格式化卷 (Windows PowerShell)"
+  - regex: "^Clear-Disk\\s"
+    description: "禁止清除磁盘 (Windows PowerShell)"
+  - regex: "^Initialize-Disk\\s"
+    description: "禁止初始化磁盘 (Windows PowerShell)"
+  - regex: "^diskpart\\s+/s\\s+.*clean"
+    description: "禁止 diskpart clean 脚本 (Windows)"
+
+  # ▸ 极危险：Windows 关机
+  - regex: "^shutdown\\s+/[sr]"
+    description: "禁止关机/重启 (Windows CMD)"
+  - regex: "^(Stop-Computer|Restart-Computer)\\b"
+    description: "禁止关机/重启 (Windows PowerShell)"
+
+  # ▸ 极危险：Windows 递归删除根
+  - regex: "^del\\s+/f\\s+/s\\s+/q\\s+[A-Z]:\\\\"
+    description: "禁止递归删除盘符 (Windows CMD)"
+  - regex: "^Remove-Item\\s+-Recurse\\s+-Force\\s+[A-Z]:\\\\"
+    description: "禁止递归删除盘符 (Windows PowerShell)"
+  - regex: "^rmdir\\s+/s\\s+/q\\s+[A-Z]:\\\\"
+    description: "禁止递归删除盘符 (Windows CMD)"
+  - regex: "^rd\\s+/s\\s+/q\\s+[A-Z]:\\\\"
+    description: "禁止递归删除盘符 (Windows CMD)"
+
+  # ▸ 高危险：远程脚本执行
+  - regex: "curl.*\\|\\s*(ba)?sh"
+    description: "禁止 curl 管道到 shell"
+  - regex: "wget.*-O\\s*-\\s*\\|\\s*(ba)?sh"
+    description: "禁止 wget 管道到 shell"
+
+  # ▸ 高危险：包安装
+  - regex: "^(pip3?|npm|gem)\\s+install\\s+(?!-r)"
+    description: "禁止安装未审查的包"
+
+  # ▸ 高危险：Git 破坏性操作
+  - regex: "^git\\s+push\\s+--force"
+    description: "禁止 git push --force"
+  - regex: "^git\\s+reset\\s+--hard"
+    description: "禁止 git reset --hard"
+  - regex: "^git\\s+clean\\s+-fd"
+    description: "禁止 git clean -fd"
+
+  # ▸ 高危险：Docker 破坏性操作
+  - regex: "docker\\s+(rm|rmi)\\s+-f\\s+\\$\\("
+    description: "禁止批量删除容器/镜像"
+  - regex: "docker\\s+system\\s+prune\\s+-af"
+    description: "禁止清理全部 Docker 资源"
+  - regex: "docker\\s+compose\\s+down\\s+-v"
+    description: "禁止 docker compose down -v"
+
+  # ▸ 高危险：动态执行
+  - regex: "^eval\\s"
+    description: "禁止 eval (Unix)"
+  - regex: "Invoke-Expression\\s"
+    description: "禁止 Invoke-Expression (Windows PowerShell)"
+  - regex: "\\biex\\s"
+    description: "禁止 iex (Windows PowerShell)"
+
+  # ▸ 高危险：防火墙
+  - regex: "iptables\\s+-F"
+    description: "禁止清空 iptables 规则 (Linux)"
+  - regex: "nft\\s+flush\\s+ruleset"
+    description: "禁止清空 nftables 规则 (Linux)"
+  - regex: "ufw\\s+disable"
+    description: "禁止关闭 ufw 防火墙 (Linux)"
+
+  # ▸ 高危险：凭证泄露
+  - regex: "curl.*\\s+-u\\s"
+    description: "禁止 curl 带 Basic Auth"
+  - regex: "-H\\s*['\"]?Authorization"
+    description: "禁止命令行携带 Authorization header"
+  - regex: "\\b(?:API_KEY|api_key|TOKEN|SECRET|PASSWORD)\\s*=\\s*\\S+"
+    description: "禁止命令行明文密钥"
+
+  # ▸ 高危险：Windows 系统破坏
+  - regex: "^sc\\s+delete\\s"
+    description: "禁止删除 Windows 服务"
+  - regex: "^reg\\s+delete\\s+(?:HKLM|HKEY_LOCAL_MACHINE)"
+    description: "禁止删除注册表系统键"
+  - regex: "^Remove-Item\\s+.*HKLM"
+    description: "禁止删除注册表 (Windows PowerShell)"
+  - regex: "^Set-ExecutionPolicy\\s+Unrestricted"
+    description: "禁止关闭执行策略 (Windows)"
+  - regex: "^net\\s+user\\s+.*\\/delete"
+    description: "禁止删除用户账户 (Windows)"
+  - regex: "^wevtutil\\s+cl\\s"
+    description: "禁止清除事件日志 (Windows)"
+  - regex: "^Remove-LocalUser\\s"
+    description: "禁止删除本地用户 (Windows PowerShell)"
+  - regex: "^Disable-WindowsOptionalFeature"
+    description: "禁止禁用系统功能 (Windows)"
+  - regex: "^wmic\\s+process\\s+where.*delete"
+    description: "禁止批量杀进程 (Windows)"
+  - regex: "^Stop-Process\\s+-Force"
+    description: "禁止强制杀进程 (Windows PowerShell)"
+
+  # ▸ 高危险：其他
+  - regex: "^rm\\s+-rf\\s"
+    description: "禁止 rm -rf 任意路径 (Unix)"
+  - regex: ">\\s*/etc/"
+    description: "禁止覆写系统配置 (Unix)"
+  - regex: ">\\s*/usr/"
+    description: "禁止覆写系统文件 (Unix)"
+  - regex: "^crontab\\s+-r"
+    description: "禁止删除 crontab (Unix)"
+  - regex: "^source\\s+[^~.]"
+    description: "禁止 source 不可信脚本 (Unix)"
+  - regex: "^\\s*\\.\\s+/"
+    description: "禁止点命令加载脚本 (Unix)"
+
+# ── 参数级别 ──
+params:
+  - command: curl
+    blocked_flags: ["-u", "--data", "--data-raw", "--data-binary"]
+    blocked_flag_patterns: ["-H\\s*['\"]?Authorization", "-H\\s*Cookie"]
+
+  - command: git
+    blocked_subcommands: ["push", "commit", "rebase", "reset", "clean", "stash"]
+
+  - command: docker
+    blocked_subcommands: ["rm", "rmi", "system", "compose"]

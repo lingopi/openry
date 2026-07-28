@@ -24,6 +24,8 @@ Agent thinks. OpenRY acts. Orchestrator orchestrates.
 | **Phase 2** | Orchestrator — state machine, sync validation, retry, payload passing, Workflow YAML | ✅ Done |
 | **Phase 2b** | OpenClaw Plugin — TypeScript orchestrator as Gateway plugin (`orchestrator-plugin/`) | ✅ Done |
 | **Phase 3a** | Advanced Validation & Routing — 10 validation types, `when`/`when_any` conditional routing | ✅ Done |
+| **Phase 3b** | Shell Executor + KnowQL + Prompt Blocks — template interpolation, kind=shell, agent payload query | ✅ Done |
+| **Phase 3c** | Command Policy Engine — regex matching, param-level control (flags/subcommands), built-in presets (strict/moderate/permissive), audit logging | ✅ Done |
 | **Phase 3-UI** | Web Dashboard — real-time workflow state tree, payload inspector, transcript viewer | ✅ Done |
 | **Config Docs** | AI-readable configuration guide (`docs/compositions-and-workflows-guide.md`) | ✅ Done |
 
@@ -41,6 +43,7 @@ Agent thinks. OpenRY acts. Orchestrator orchestrates.
 - **10 Validation Types**: `payload_has_key`, `payload_value_matches`, `payload_values_equal/not_equal`, `payload_value_equals`, `payload_value_in_set`, `payload_value_greater/less_than`, `payload_type`, `file_exists/contains/size`, `command`/`command_output_contains`, `db_query`, `http_status`, `json_schema`
 - **Web Dashboard**: `openry serve` — browser-based UI for real-time workflow monitoring, payload inspection, and transcript viewing
 - **AI Configuration Guide**: comprehensive prompt (`docs/compositions-and-workflows-guide.md`) that teaches AI how to write OpenRY YAML configs
+- **Command Policy Engine**: regex-based command filtering with built-in presets (`strict`/`moderate`/`permissive`), param-level control (flags, subcommands, scripts), and audit logging for rejected commands
 
 ## Why OpenRY
 

@@ -851,6 +851,11 @@ export class PatrolLoop {
 
     const merged = nextStep.inherit_payload ? currentPayload : {};
 
+    // Phase 3c: serialize command_policy if present
+    const commandPolicyJson = nextStep.command_policy != null
+      ? JSON.stringify(nextStep.command_policy)
+      : null;
+
     db.enqueueNextSubStep(this.db, {
       newRunId,
       workflow: (task.workflow as string) || "",
@@ -865,6 +870,7 @@ export class PatrolLoop {
       maxOutputTokens: nextStep.max_output_tokens ?? 0,
       onOutputOverflow: nextStep.on_output_overflow ?? "",
       onValidationFail: nextStep.on_validation_fail ?? "retry_current",
+      commandPolicyJson: commandPolicyJson ?? undefined,
     });
 
     db.updateTaskStatus(this.db, task.run_id as string, "done");

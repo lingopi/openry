@@ -1,0 +1,9 @@
+# OpenRY — permissive 策略（内置）
+# 包含：无拦截，允许所有命令
+# 适用：本地调试、完全可信的 agent、开发测试
+# 用法：在 workflow YAML 中设置 command_policy: permissive
+#
+# 注意：此策略模式下 agent 可以执行任意命令，包括 rm -rf /。
+#       仅应在完全可信的环境中使用。
+
+mode: unrestricted

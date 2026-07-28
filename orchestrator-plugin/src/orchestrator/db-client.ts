@@ -200,6 +200,7 @@ export function enqueueNextSubStep(
     maxOutputTokens: number;
     onOutputOverflow: string;
     onValidationFail: string;
+    commandPolicyJson?: string;
   },
 ): void {
   db.prepare(
@@ -207,8 +208,8 @@ export function enqueueNextSubStep(
      (run_id, workflow, step_id, big_step_ref, sub_step_id,
       status, payload, workflow_instance_id, max_tool_calls,
       max_retries, max_sub_step_retries, max_output_tokens,
-      on_output_overflow, on_validation_fail)
-     VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      on_output_overflow, on_validation_fail, command_policy_json)
+     VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     params.newRunId,
     params.workflow,
@@ -223,6 +224,7 @@ export function enqueueNextSubStep(
     params.maxOutputTokens,
     params.onOutputOverflow,
     params.onValidationFail,
+    params.commandPolicyJson ?? null,
   );
 }
 
@@ -237,6 +239,62 @@ export function getCommandsHistory(
     )
     .all(runId) as Array<Record<string, unknown>>;
 }
+
+// ── Phase 3c: commands_log schema extension + rejected command logging ─
+
+/**
+ * 确保 commands_log 表包含 3c 新增列（幂等）。
+ * 在 Plugin 启动时调用一次。
+ */
+export function ensureCommandLogColumns(db: Database.Database): void {
+  const cols = db
+    .prepare("PRAGMA table_info(commands_log)")
+    .all() as Array<{ name: string }>;
+  const colNames = new Set(cols.map((c) => c.name));
+
+  if (!colNames.has("status")) {
+    db.exec("ALTER TABLE commands_log ADD COLUMN status TEXT DEFAULT 'executed'");
+  }
+  if (!colNames.has("reject_reason")) {
+    db.exec("ALTER TABLE commands_log ADD COLUMN reject_reason TEXT");
+  }
+  if (!colNames.has("policy_rule")) {
+    db.exec("ALTER TABLE commands_log ADD COLUMN policy_rule TEXT");
+  }
+}
+
+/**
+ * 记录一条被策略拒绝的命令到 commands_log。
+ * 与 Python CLI 的 insert_command() 独立，不冲突。
+ */
+export function insertRejectedCommand(
+  db: Database.Database,
+  params: {
+    runId: string;
+    command: string;
+    reason: string;
+    policyRule: string;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO commands_log
+     (run_id, command, shell, cwd, exit_code, stdout, stderr, duration_ms, status, reject_reason, policy_rule)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'rejected', ?, ?)`,
+  ).run(
+    params.runId,
+    params.command,
+    "/bin/sh",
+    process.cwd(),
+    -1,
+    "",
+    params.reason,
+    0,
+    params.reason,
+    params.policyRule,
+  );
+}
+
+// ── Mutations (continued) ──────────────────────────────────────
 
 export function updateWorkflowInstanceCurrentStep(
   db: Database.Database,

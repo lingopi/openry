@@ -1,0 +1,10 @@
+# Phase 3c 命令策略测试 Composition
+
+name: phase3c_policy_test
+version: "1.0"
+description: "Phase 3c 命令策略验证 — 测试 strict/内联/permissive/无策略"
+
+big_steps:
+  - ref: policy_test
+    on_success: done
+    on_failure: abort

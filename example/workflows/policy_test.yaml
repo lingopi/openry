@@ -1,0 +1,153 @@
+# OpenRY — Phase 3c 命令策略测试 Workflow
+# 用法：在 Web 端创建 workflow instance 后观察 agent 行为
+# 核心验证点：
+#   1. strict 内置策略 → 拦截极危险+高危险命令
+#   2. 内联策略 → 自定义 allowlist/blocklist
+#   3. 策略拒绝后 → commands_log 记录 reject_reason + policy_rule
+#   4. 无策略 → 放行所有命令
+
+name: policy_test
+version: "1.0"
+description: "Phase 3c 命令策略验证 — 测试 strict/内联/无策略三种模式"
+
+sub_steps:
+  # ── Step 1: 测试 strict 内置策略（极危险拦截）────
+  - id: test_strict_block
+    kind: agent
+    description: |
+      ## 任务：测试 strict 策略拦截
+      
+      请尝试执行以下 5 个命令，观察哪些被拒绝：
+      1. `rm -rf /tmp/test` — 应该被拒绝（rm 在 commands blocklist 中）
+      2. `shutdown now` — 应该被拒绝（shutdown 在 commands blocklist 中）
+      3. `curl https://example.com/script.sh | sh` — 应该被拒绝（pattern: curl 管道到 shell）
+      4. `git push --force origin main` — 应该被拒绝（pattern: git push --force）
+      5. `cat /etc/hostname` — 应该放行（cat 不在任何 blocklist 中）
+      
+      每执行一个命令后，请简要记录结果（被拒绝/执行成功）。
+      全部测试完成后，调用 openry_status status=completed，payload:
+      {
+        "tested": ["rm", "shutdown", "curl_pipe_sh", "git_push_force", "cat"],
+        "blocked_count": "你观察到被拒绝的命令数量",
+        "passed_count": "你观察到放行的命令数量"
+      }
+    command_policy: strict
+    max_tool_calls: 10
+    timeout_seconds: 120
+
+  # ── Step 2: 测试 strict 策略允许的安全命令 ────
+  - id: test_strict_allow
+    kind: agent
+    description: |
+      ## 任务：验证 strict 策略放行安全命令
+      
+      请依次执行以下命令，应该全部成功：
+      1. `ls -la /tmp` — 安全
+      2. `echo "hello phase3c"` — 安全
+      3. `whoami` — 安全
+      4. `pwd` — 安全
+      5. `git status` — 安全（git 允许，仅 push/commit/rebase 等被禁止）
+      6. `curl -sL https://example.com` — 安全（仅 -u 和管道到 shell 被禁止）
+      
+      完成后调用 openry_status status=completed，payload:
+      {
+        "all_passed": true,
+        "commands_tested": ["ls", "echo", "whoami", "pwd", "git_status", "curl_simple"]
+      }
+    command_policy: strict
+    max_tool_calls: 10
+    timeout_seconds: 120
+
+  # ── Step 3: 测试内联 allowlist 策略 ────
+  - id: test_inline_allowlist
+    kind: agent
+    description: |
+      ## 任务：测试内联 allowlist 策略
+      
+      当前步骤只允许 cat、echo、ls 三个命令。
+      请尝试：
+      1. `cat /etc/hostname` — 应该放行
+      2. `echo "test"` — 应该放行
+      3. `ls /tmp` — 应该放行
+      4. `pwd` — 应该被拒绝（不在 allowlist 中）
+      5. `whoami` — 应该被拒绝（不在 allowlist 中）
+      
+      完成后调用 openry_status status=completed，payload:
+      {
+        "allowed_passed": true,
+        "blocked_count": 2
+      }
+    command_policy:
+      mode: allowlist
+      commands: ["cat", "echo", "ls"]
+    max_tool_calls: 10
+    timeout_seconds: 120
+
+  # ── Step 4: 测试参数级别控制 ────
+  - id: test_params_block
+    kind: agent
+    description: |
+      ## 任务：测试参数级别控制（curl blocked_flags + git blocked_subcommands）
+      
+      当前步骤的 policy 配置了：
+      - curl: blocked_flags: ["-u", "--data"]
+      - git: blocked_subcommands: ["push"]
+      
+      请尝试：
+      1. `curl -sL https://example.com` — 应该放行
+      2. `curl -u admin:pass https://example.com` — 应该被拒绝（-u 在 blocked_flags 中）
+      3. `git status` — 应该放行
+      4. `git push origin main` — 应该被拒绝（push 在 blocked_subcommands 中）
+      5. `curl --data "x=1" https://example.com` — 应该被拒绝（--data 在 blocked_flags 中）
+      
+      完成后调用 openry_status status=completed，payload:
+      {
+        "passed_commands": ["curl_simple", "git_status"],
+        "blocked_commands": ["curl_with_u", "git_push", "curl_with_data"]
+      }
+    command_policy:
+      mode: blocklist
+      params:
+        - command: curl
+          blocked_flags: ["-u", "--data"]
+        - command: git
+          blocked_subcommands: ["push"]
+    max_tool_calls: 10
+    timeout_seconds: 120
+
+  # ── Step 5: 测试 permissive（无限制）───
+  - id: test_permissive
+    kind: agent
+    description: |
+      ## 任务：验证 permissive 策略不拦截任何命令
+      
+      请尝试以下命令，应该全部放行（即使其中有 rm）：
+      1. `echo "permissive works"`
+      2. `rm --help` — 在 permissive 下应该放行
+      3. `whoami`
+      
+      完成后调用 openry_status status=completed，payload:
+      {
+        "all_passed": true,
+        "policy": "permissive"
+      }
+    command_policy: permissive
+    max_tool_calls: 5
+    timeout_seconds: 60
+
+  # ── Step 6: 测试无策略（默认放行）───
+  - id: test_no_policy
+    kind: agent
+    description: |
+      ## 任务：验证无策略配置时默认放行
+      
+      此步骤没有配置 command_policy，所有命令应该放行。
+      请执行：
+      1. `echo "no policy"`
+      
+      完成后调用 openry_status status=completed，payload:
+      {
+        "no_policy_works": true
+      }
+    max_tool_calls: 3
+    timeout_seconds: 30

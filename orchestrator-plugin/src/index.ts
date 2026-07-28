@@ -49,6 +49,37 @@ function escapeShell(cmd: string): string {
 
 import { evaluateOpenryExecGate } from "./tools/trusted-policy.js";
 
+// ── Phase 3c: command policy ──────────────────────────────────
+
+import { resolvePolicy, evaluatePolicy } from "./orchestrator/command-policy.js";
+import {
+  ensureCommandLogColumns,
+  insertRejectedCommand,
+} from "./orchestrator/db-client.js";
+
+/** 从 DB 读取当前 run 的 sub_step 配置，加载其 command_policy */
+function loadCommandPolicyForRun(runId: string) {
+  if (runId === "unknown") return null;
+  try {
+    const basePath = process.env.OPENRY_HOME ?? path.join(os.homedir(), ".openry");
+    const db = openDb(getDbPath(basePath));
+    const row = db
+      .prepare("SELECT big_step_ref, sub_step_id FROM task_state WHERE run_id = ?")
+      .get(runId) as { big_step_ref: string; sub_step_id: string } | undefined;
+    db.close();
+
+    if (!row?.big_step_ref || !row?.sub_step_id) return null;
+
+    const bigStep = loadBigStep(row.big_step_ref);
+    const subStep = getSubStepConfig(bigStep, row.sub_step_id);
+    if (!subStep) return null;
+
+    return resolvePolicy(subStep.command_policy ?? null);
+  } catch {
+    return null;
+  }
+}
+
 // ── KnowQL ────────────────────────────────────────────────────
 
 import * as path from "node:path";
@@ -95,6 +126,33 @@ const plugin = {
           if (!command?.trim()) {
             return textResult("Error: command is required", null);
           }
+
+          // ── Phase 3c: command policy check ──
+          const policy = loadCommandPolicyForRun(run_id);
+          if (policy) {
+            const result = evaluatePolicy(command, policy);
+            if (!result.allowed) {
+              // Log rejected command to DB (best-effort, don't block on failure)
+              try {
+                const basePath = process.env.OPENRY_HOME ?? path.join(os.homedir(), ".openry");
+                const db = openDb(getDbPath(basePath));
+                ensureCommandLogColumns(db);
+                insertRejectedCommand(db, {
+                  runId: run_id,
+                  command,
+                  reason: result.reason ?? "unknown",
+                  policyRule: result.rule ?? "policy",
+                });
+                db.close();
+              } catch { /* DB write failure is non-fatal */ }
+              return textResult(
+                `⛔ 命令被策略拒绝: ${result.reason}`,
+                null,
+              );
+            }
+          }
+          // ── end Phase 3c ──
+
           try {
             const execEnv = {
               ...process.env,

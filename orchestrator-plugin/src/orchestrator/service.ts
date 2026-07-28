@@ -5,7 +5,7 @@
 import * as path from "node:path";
 import * as os from "node:os";
 import type { OpenClawPluginServiceContext } from "openclaw/plugin-sdk/plugin-entry";
-import { openDb, getDbPath } from "./db-client.js";
+import { openDb, getDbPath, ensureCommandLogColumns } from "./db-client.js";
 import { PatrolLoop, type PatrolConfig } from "./patrol.js";
 import { setConfigDir } from "./yaml-loader.js";
 function resolveOpenryDir(ctx: OpenClawPluginServiceContext): string {
@@ -39,6 +39,9 @@ export function createOrchestratorService() {
         const dbPath = getDbPath(openryDir);
         console.log("[orchestrator-plugin] starting, db=", dbPath);
         const db = openDb(dbPath);
+
+        // Phase 3c: ensure commands_log schema is up to date
+        ensureCommandLogColumns(db);
 
         // Resolve openclaw path (might not be in Gateway's minimal PATH)
         const openclawPath = process.env.OPENCLAW_BIN || "openclaw";
