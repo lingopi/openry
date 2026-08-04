@@ -17,7 +17,7 @@
     "onStartup": true
   },
   "contracts": {
-    "tools": ["openry_run", "openry_status", "openry_payload_query"],
+    "tools": ["openry_run", "openry_status", "openry_payload_query", "openry_knowledge_query"],
     "trustedToolPolicies": ["openry-exec-gate"]
   }
 }

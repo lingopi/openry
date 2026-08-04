@@ -46,6 +46,10 @@ const API = {
     return this._fetch('/api/v1/metrics');
   },
 
+  getConcepts() {
+    return this._fetch('/api/v1/concepts');
+  },
+
   triggerWorkflow(workflow, payload) {
     return this._post('/api/v1/trigger', { workflow, payload });
   },

@@ -72,6 +72,7 @@ const App = {
     // Load data
     switch (view) {
       case 'workflows': WorkflowTree.loadWorkflows(); break;
+      case 'concepts': ConceptsView.load(); break;
       case 'history': this._loadHistory(); break;
       case 'commands': this._loadCommands(); break;
       case 'metrics': MetricsCards.load(); break;

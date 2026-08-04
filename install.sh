@@ -187,7 +187,7 @@ PROMPTS_DIR="${SCRIPT_DIR}/prompts"
 if [ -d "$PROMPTS_DIR" ]; then
     echo -e "  Installing agent prompts..."
     cp -n "$PROMPTS_DIR/"*.md "$OPENRY_HOME/prompts/" 2>/dev/null || true
-    echo -e "  ${GREEN}✓${NC} Prompts copied to ${CYAN}${OPENRY_HOME}/prompts/${NC} (knowql-agent-prompt.md, compositions-and-workflows-guide.md)"
+    echo -e "  ${GREEN}✓${NC} Prompts copied to ${CYAN}${OPENRY_HOME}/prompts/${NC} (knowql-agent-prompt.md, semantic-primitives.md, compositions-and-workflows-guide.md)"
     echo ""
 fi
 

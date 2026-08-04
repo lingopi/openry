@@ -26,6 +26,11 @@ export function queryQueuedTasks(
     .prepare(
       `SELECT * FROM task_state
        WHERE status = 'queued'
+         AND (
+           json_extract(payload, '$._compressed') IS NULL
+           OR json_extract(payload, '$._compressed') = 1
+           OR json_extract(payload, '$._compressed') = 'true'
+         )
        ORDER BY created_at ASC
        LIMIT ?`,
     )
@@ -456,4 +461,64 @@ export function getStepPayload(
   } catch {
     return null;
   }
+}
+
+// ── Phase C: 语义蒸馏辅助查询 ──────────────────────────────────
+
+/**
+ * 查询 _compressed: false 的已完成/已验证 step（shell 产出，待蒸馏）。
+ */
+export function queryUncompressedTasks(
+  db: Database.Database,
+  limit: number,
+): Array<Record<string, unknown>> {
+  return db
+    .prepare(
+      `SELECT run_id, payload, sub_step_id, big_step_ref, workflow_instance_id
+       FROM task_state
+       WHERE status IN ('completed', 'validated', 'done')
+         AND (json_extract(payload, '$._compressed') = 0
+              OR json_extract(payload, '$._compressed') = 'false')
+       ORDER BY updated_at ASC
+       LIMIT ?`,
+    )
+    .all(limit) as Array<Record<string, unknown>>;
+}
+
+/**
+ * 查找依赖指定 run_id 的 queued step（通过 _inherits_from_run_id）。
+ */
+export function queryDownstreamQueuedTasks(
+  db: Database.Database,
+  sourceRunId: string,
+): Array<{ run_id: string }> {
+  return db
+    .prepare(
+      `SELECT run_id FROM task_state
+       WHERE status = 'queued'
+         AND json_extract(payload, '$._inherits_from_run_id') = ?`,
+    )
+    .all(sourceRunId) as Array<{ run_id: string }>;
+}
+
+/**
+ * Phase D: 查询 agent step 中有 concepts 但未归一化（缺 _core_id）的记录。
+ * 用于 scanAndNormalizeAgentConcepts 巡逻步骤。
+ */
+export function queryAgentStepsNeedingNormalization(
+  db: Database.Database,
+  limit: number,
+): Array<Record<string, unknown>> {
+  return db
+    .prepare(
+      `SELECT run_id, payload FROM task_state
+       WHERE status = 'done'
+         AND run_id NOT LIKE 'compress-%'
+         AND json_extract(payload, '$.concepts') IS NOT NULL
+         AND (json_extract(payload, '$._core_id') IS NULL
+              OR json_extract(payload, '$._core_id') = '')
+       ORDER BY updated_at ASC
+       LIMIT ?`,
+    )
+    .all(limit) as Array<Record<string, unknown>>;
 }

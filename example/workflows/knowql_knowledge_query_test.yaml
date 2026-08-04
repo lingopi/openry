@@ -1,0 +1,30 @@
+# ============================================================================
+# knowql_knowledge_query_test — Phase D 知识检索测试
+# ============================================================================
+# 测试 openry_knowledge_query 工具：
+#   1. agent 调用 --search 搜索已蒸馏的历史知识
+#   2. 验证返回的 payload 包含 concepts + _core_id
+#   3. agent 解读返回结果并上报
+# ============================================================================
+name: knowql_knowledge_query_test
+version: "1.0"
+description: "Phase D 端到端测试：agent 调用 openry_knowledge_query 检索语义知识"
+timeout_minutes: 10
+max_retries: 0
+
+sub_steps:
+  # ── Step 1: Agent 查询知识库 ──
+  - id: query_knowledge
+    kind: agent
+    description: |
+      搜索知识库，查找与 "email reply draft creation" 相关的历史 workflow 记录。
+      看看以前是否有过类似的邮件自动化处理流程。
+
+      拿到搜索结果后通过 openry_status completed 上报：
+        - 匹配到多少条记录
+        - concepts 标签是什么
+        - 是否包含 _core_id
+    on_success: done
+    on_failure: abort
+    max_tool_calls: 5
+    expect_payload: true

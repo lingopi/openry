@@ -247,6 +247,31 @@ sub_steps:
 | `command_policy.mode` | string | 否 | `unrestricted` | `unrestricted`：不限制；`allowlist`：只允许列表中的命令；`blocklist`：禁止列表中的命令 |
 | `command_policy.commands` | list[string] | 否 | `[]` | 命令名列表（取命令字符串的第一个空格前 token 匹配） |
 
+### 5.7 语义蒸馏字段（Phase D）
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|:--:|--------|------|
+| `semantic_reporting` | bool | 否 | `true` | 是否启用语义蒸馏和概念聚类。`false` 时：agent step 不会收到 8 原语 + concepts 上报提示词；shell step 不会触发蒸馏 agent。该 step 的产出不会进入向量知识库 |
+
+**设计意图**：并非所有 step 都需要进入知识库。对于纯工具调用、数据格式转换、或中间临时的 step，设置 `semantic_reporting: false` 可以减少 LLM token 消耗并避免无意义的向量存储。
+
+```yaml
+# 示例：一个不需要语义蒸馏的纯工具 step
+- id: format_converter
+  kind: agent
+  description: "将 JSON 转换为 CSV 格式"
+  semantic_reporting: false   # 不上报 concepts，不进向量库
+  on_success: done
+  on_failure: abort
+```
+
+**行为差异**：
+
+| `semantic_reporting` | agent step | shell step |
+|---------------------|-----------|------------|
+| `true`（默认） | prompt 末尾自动注入 `semantic-primitives.md`；agent 可按指南上报 concepts | 输出被扫描 → 触发蒸馏 agent → 蒸馏产物进入向量库 |
+| `false` | prompt 中不含语义上报指南；agent 不上报 concepts 也不会报错 | 跳过蒸馏，直接标记 `_compressed: true`；不进向量库 |
+
 ---
 
 ## 6. 硬代码验证规则（Validation）
@@ -768,7 +793,13 @@ Orchestrator 不直接杀进程，而是通过 `cancel_requested` 标志通知 a
 - 推荐大多数 sub_step 使用 `mode: blocklist`，禁止 `rm`、`sudo`、`chmod`、`chown`、`kill`、`shutdown`、`reboot`
 - 只读类 sub_step（如数据查询）可使用 `mode: allowlist`，只允许 `cat`、`grep`、`ls`、`find`、`wc`、`head`、`tail`
 
-### 12.5 验证规则选择
+### 12.5 语义蒸馏控制
+
+- 对纯工具型、数据转换型、或中间临时的 step，设置 `semantic_reporting: false` 以减少 LLM token 消耗
+- 对产出可供下游检索的业务知识的 step，保持默认 `true` 让 concepts 进入向量库
+- shell step 搭配 `semantic_reporting: false` 可完全跳过蒸馏流程，适用于简单文件读取等无语义价值的操作
+
+### 12.6 验证规则选择
 
 | 场景 | 推荐验证类型 |
 |------|------------|
@@ -782,7 +813,7 @@ Orchestrator 不直接杀进程，而是通过 `cancel_requested` 标志通知 a
 | 验证数值范围 | `payload_value_greater_than` / `payload_value_less_than` |
 | 验证复杂嵌套结构 | `json_schema` |
 
-### 12.6 条件路由设计
+### 12.7 条件路由设计
 
 - **先硬验证，后条件路由**：`payload_keys` 确保 agent 产出了必要数据，`validation_routing` 基于已有数据做决策
 - **`when` 用于 AND 逻辑**：多个 `when` 条目串联形成"全部满足才通过"的效果
@@ -790,7 +821,7 @@ Orchestrator 不直接杀进程，而是通过 `cancel_requested` 标志通知 a
 - **`on_mismatch` 优先选择 `retry_current`**：让 agent 尝修正，而非直接 abort
 - **`on_mismatch_message` 要有指导性**：告诉 agent 具体哪里不对，而非泛泛的"验证失败"
 
-### 12.7 调试技巧
+### 12.8 调试技巧
 
 - 配置好 workflow 后，先用最小的 sub_step（如 `echo` 测试）验证整个链路通畅
 - 查看 `commands_log` 表了解 agent 的工具调用历史

@@ -349,6 +349,43 @@ const plugin = {
       };
     });
 
+    // ── openry_knowledge_query（KnowQL Knowledge）──
+    api.registerTool((ctx: OpenClawPluginToolContext) => {
+      return {
+        name: "openry_knowledge_query",
+        label: "OpenRY Knowledge Query",
+        description:
+          "Search through concepts and semantic labels from all previously run workflows. " +
+          "Use this to find historical knowledge: how similar tasks were handled, what tools/APIs were used. " +
+          "Provide a natural language description of what you want to find.",
+        parameters: Type.Object({
+          search: Type.String({
+            description:
+              "Natural language description of what you want to find. " +
+              "Be specific. E.g. 'offboarding device lost asset management system'.",
+          }),
+        }),
+        async execute(_toolCallId: string, params: unknown) {
+          const { search } = params as { search: string };
+          if (!search?.trim()) {
+            return textResult("Error: --search is required", null);
+          }
+          try {
+            const basePath = process.env.OPENRY_HOME ?? path.join(os.homedir(), ".openry");
+            const db = openDb(getDbPath(basePath));
+            const { executeQuery } = await import("./knowql-knowledge/executor.js");
+            const result = await executeQuery(db, {
+              query: "knowledge", search, mode: "best", sort: "desc", limit: 5,
+            });
+            db.close();
+            return textResult(JSON.stringify(result, null, 2), null);
+          } catch (err) {
+            return textResult(`openry_knowledge_query error: ${String(err)}`, null);
+          }
+        },
+      };
+    });
+
     // ── trusted tool policy ──
     api.registerTrustedToolPolicy({
       id: "openry-exec-gate",

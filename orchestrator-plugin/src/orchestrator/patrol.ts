@@ -32,6 +32,10 @@ import {
   mapExitCode,
 } from "./shell-executor.js";
 
+// ── KnowQL Knowledge（实验模块）────────────────────────────────
+// 集成点 #3, #4, #5 — 详见 src/knowql-knowledge/INTEGRATION.md
+import { normalizeConcepts } from "../knowql-knowledge/index.js";
+
 // ── KnowQL agent guide ─────────────────────────────────────────
 // Injected into opening message when sub_step.allow_payload_query is true.
 // Read from external .md file for easy updates without recompilation.
@@ -45,6 +49,21 @@ function loadKnowQLGuide(): string {
     }
   } catch { /* fallback to inline default */ }
   return getDefaultKnowQLGuide();
+}
+
+// ── Semantic primitives guide ──────────────────────────────────
+// 8 原语语义上报指南，默认注入所有 agent step。
+// Read from external .md file for easy updates without recompilation.
+
+const SEMANTIC_PRIMITIVES_PATH = path.join(os.homedir(), ".openry", "prompts", "semantic-primitives.md");
+
+function loadSemanticPrimitives(): string {
+  try {
+    if (fs.existsSync(SEMANTIC_PRIMITIVES_PATH)) {
+      return `---\n${fs.readFileSync(SEMANTIC_PRIMITIVES_PATH, "utf-8")}\n---`;
+    }
+  } catch { /* file missing or unreadable — guide is optional, skip silently */ }
+  return "";
 }
 
 function getDefaultKnowQLGuide(): string {
@@ -212,6 +231,9 @@ export class PatrolLoop {
       this.reapZombies();        // 1. 清理 activeRuns 中已退出的子进程
       this.checkTimeout();         // 2. 超时检测 → 软刹车
       this.checkMaxToolCalls();    // 3. max_tool_calls 超限检测
+      this.forceTimeoutQueued();   // 3.5 Phase B: 压缩超时兜底 → 强制放行
+      this.scanAndCompress();      // 3.6 Phase C: 扫描未压缩 shell step → 触发蒸馏
+      this.scanAndNormalizeAgentConcepts(); // 3.7 Phase D: 扫描 agent step concepts → 聚类归一化
       this.dispatchQueued();       // 4. 调度 queued 任务
       this.checkZombies();         // 5. 僵死检测
       this.validatePhase3a().catch(err => console.error("[orchestrator-plugin] Phase 3a error:", err)); // 5.5
@@ -300,6 +322,291 @@ export class PatrolLoop {
         db.updateTaskStatus(this.db, t.run_id, "failed");
         this.killRun(t.run_id);
       }
+    }
+  }
+
+  // ── 3.5 Phase B: 压缩超时兜底 ────────────────────────────
+
+  /**
+   *  _compressed: false 的 queued 任务等待超过 5 分钟 → 强制放行。
+   *  防止压缩 workflow 失效导致下游永久阻塞。
+   */
+  private forceTimeoutQueued(): void {
+    this.db.prepare(`
+      UPDATE task_state
+      SET payload = json_set(payload, '$._compressed', json('true')),
+          payload = json_set(payload, '$._compressed_timeout', json('true'))
+      WHERE status = 'queued'
+        AND (json_extract(payload, '$._compressed') = 0
+             OR json_extract(payload, '$._compressed') = 'false')
+        AND created_at < datetime('now', '-5 minutes')
+    `).run();
+  }
+
+  // ── 3.6 Phase C: Shell 语义蒸馏扫描 ──────────────────────
+
+  /**
+   * 扫描 _compressed: false 的已完成 shell step，spawn 蒸馏 agent。
+   * 每次 patrol 周期最多触发一个蒸馏任务（避免 worker 池耗尽）。
+   */
+  private scanAndCompress(): void {
+    const available = this.pool.available();
+    if (available <= 0) return;
+
+    const tasks = db.queryUncompressedTasks(this.db, 1);
+    if (tasks.length === 0) return;
+
+    const task = tasks[0];
+    const sourceRunId = task.run_id as string;
+    let stdout = "";
+
+    // 从 payload 读取原始 stdout
+    try {
+      const payload = JSON.parse((task.payload as string) || "{}");
+      stdout = (payload._stdout as string) || "";
+    } catch { /* skip */ }
+
+    if (!stdout.trim()) {
+      this.db.prepare(
+        `UPDATE task_state SET payload = json_set(payload, '$._compressed', json('true'))
+         WHERE run_id = ?`
+      ).run(sourceRunId);
+      return;
+    }
+
+    // TODO: oversized guard 暂时关闭，测试 LLM 蒸馏长文本的能力
+    // 后续应改为截断蒸馏（取前 N 字符送 LLM）而非完全跳过
+    // const MAX_DISTILL_STDOUT = 8000;
+    // if (stdout.length > MAX_DISTILL_STDOUT) {
+    //   this.db.prepare(
+    //     `UPDATE task_state SET payload = json_set(json_set(payload, '$._compressed', json('true')), '$._compressed_oversized', json('true'))
+    //      WHERE run_id = ?`
+    //   ).run(sourceRunId);
+    //   const downstream = db.queryDownstreamQueuedTasks(this.db, sourceRunId);
+    //   for (const ds of downstream) {
+    //     this.db.prepare(
+    //       `UPDATE task_state SET payload = json_set(json_set(payload, '$._compressed', json('true')), '$._compressed_oversized', json('true'))
+    //        WHERE run_id = ?`
+    //     ).run(ds.run_id);
+    //   }
+    //   console.log(`[orchestrator-plugin] distill skipped for ${sourceRunId} (${stdout.length} > ${MAX_DISTILL_STDOUT})`);
+    //   return;
+    // }
+
+    // 读取 shell step 的 YAML 配置，获取 payload_keys 和 semantic_reporting
+    const subStepId = (task.sub_step_id as string) || "";
+    const bigStepRef = (task.big_step_ref as string) || "";
+    let payloadKeys: string[] = [];
+    let semanticReporting = true; // 默认启用
+    try {
+      const bigStep = loadBigStep(bigStepRef);
+      const ss = getSubStepConfig(bigStep, subStepId);
+      if (ss?.payload_keys) payloadKeys = ss.payload_keys;
+      if (ss?.semantic_reporting === false) semanticReporting = false;
+    } catch { /* skip */ }
+
+    // semantic_reporting: false → 跳过蒸馏，直接标记压缩完成
+    if (!semanticReporting) {
+      this.db.prepare(
+        `UPDATE task_state SET payload = json_set(payload, '$._compressed', json('true'))
+         WHERE run_id = ?`
+      ).run(sourceRunId);
+      console.log(`[orchestrator-plugin] semantic reporting disabled for ${sourceRunId}, skipping distill`);
+      return;
+    }
+
+    const distillRunId = `compress-${sourceRunId.slice(0, 8)}`;
+
+    // 防重：如果已有蒸馏任务（任意非失败状态），跳过
+    const existing = this.db.prepare(
+      `SELECT status FROM task_state WHERE run_id = ?`
+    ).get(distillRunId) as { status: string } | undefined;
+    if (existing) {
+      // 已完成、已验证、进行中、排队中 → 不重复触发
+      if (['queued', 'in_progress', 'completed', 'validated', 'done'].includes(existing.status)) {
+        return;
+      }
+      // failed/dropped → 可以重试，继续往下走
+    }
+
+    const sessionKey = `agent:openry-worker:openry:wf:semantic_compress:step:distill:run:${distillRunId}`;
+    try {
+      const srcWfId = (task.workflow_instance_id as number) || 0;
+
+      // 为蒸馏 agent 创建/更新 task_state 行
+      // 必须设 big_step_ref，buildTaskDescription() 才能从 YAML 读取提示词
+      const existingRow = this.db.prepare(
+        `SELECT status FROM task_state WHERE run_id = ?`
+      ).get(distillRunId) as { status: string } | undefined;
+      if (!existingRow) {
+        this.db.prepare(
+          `INSERT INTO task_state (run_id, workflow, step_id, big_step_ref, status, payload, workflow_instance_id)
+           VALUES (?, 'semantic_compress', 'distill', 'semantic_compress', 'in_progress', '{}', ?)`
+        ).run(distillRunId, srcWfId);
+      } else if (existingRow.status === 'failed' || existingRow.status === 'dropped') {
+        // 之前失败过，重置为 in_progress 以允许重试
+        this.db.prepare(
+          `UPDATE task_state SET status = 'in_progress', payload = '{}', big_step_ref = 'semantic_compress', updated_at = datetime('now')
+           WHERE run_id = ?`
+        ).run(distillRunId);
+      }
+
+      // ── 变动 2：用 buildTaskDescription 统一构建提示词 ──
+      // semantic-primitives.md 自动注入（8 原语 + concepts 引导），YAML 只写任务描述
+      // 将 shell step 的原始 payload（含 _stdout）传给蒸馏 agent，免去 agent 自己查 DB
+      const distillTask = {
+        sub_step_id: "distill",
+        big_step_ref: "semantic_compress",
+        payload: (task.payload as string) || "{}",
+      };
+      let desc = this.buildTaskDescription(distillTask);
+
+      // payloadKeys 段：有则插入提取要求，无则替换为空
+      if (payloadKeys.length > 0) {
+        const keysSection = `## 领域层提取要求\n请从原始输出中提取以下字段：${payloadKeys.join(', ')}`;
+        desc = desc.replace(/\{\{payloadKeysSection\}\}/g, keysSection);
+      } else {
+        desc = desc.replace(/\{\{payloadKeysSection\}\}/g, "");
+      }
+
+      this.pool.acquire();
+      const proc = spawn(this.config.openclawPath, [
+        "agent", "--agent", this.config.agentId,
+        "--session-key", sessionKey, "--message", desc,
+        "--json", "--timeout", "300",
+      ], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env,
+        OPENRY_RUN_ID: distillRunId,
+        PATH: [
+          process.env.PATH || '/usr/bin:/bin',
+          '/usr/local/bin',
+          `${process.env.HOME}/bin`,
+          `${process.env.HOME}/.local/bin`,
+          '/opt/homebrew/bin',
+        ].join(':'),
+      } });
+      this.activeRuns.set(distillRunId, proc);
+      proc.on("close", async (code) => {
+        this.activeRuns.delete(distillRunId);
+        this.pool.release();
+        if (code === 0) {
+          await this.handleDistillComplete(sourceRunId, distillRunId);
+        }
+        console.log(`[orchestrator-plugin] distill agent for ${sourceRunId} exited (code=${code})`);
+      });
+      proc.on("error", (err) => {
+        this.activeRuns.delete(distillRunId);
+        this.pool.release();
+        console.error(`[orchestrator-plugin] distill spawn error for ${sourceRunId}:`, err.message);
+      });
+      console.log(`[orchestrator-plugin] distill agent dispatched for ${sourceRunId}`);
+    } catch (err) {
+      try { this.pool.release(); } catch { /* already released */ }
+      console.error(`[orchestrator-plugin] distill spawn exception:`, err);
+    }
+  }
+
+  /**
+   * 蒸馏 agent 完成后的回写逻辑：
+   * 1. 读取蒸馏 agent 上报的 payload
+   * 2. 更新源 shell step 的 payload（覆盖为蒸馏结果）
+   * 3. 更新继承此 step 的下游 queued step
+   */
+  private async handleDistillComplete(sourceRunId: string, distillRunId: string): Promise<void> {
+    // 从 task_state 读取蒸馏 agent 上报的 payload
+    // 状态可能已经是 done（被 routeValidated 处理过），不限制状态
+    const row = this.db.prepare(
+      `SELECT payload FROM task_state WHERE run_id = ?`
+    ).get(distillRunId) as { payload: string } | undefined;
+
+    if (!row) return;
+
+    try {
+      const distilledPayload = JSON.parse(row.payload);
+      if (distilledPayload._compressed === true || distilledPayload._compressed === 1 || distilledPayload._compressed === 'true') {
+
+        // ── KnowQL Knowledge 集成点 #4：同步聚类归一化 ──
+        const rawConcepts: string[] = distilledPayload.concepts || [];
+        let coreId: string | null = null;
+        let displayConcepts: string[] = rawConcepts;
+        if (rawConcepts.length > 0) {
+          try {
+            const result = await normalizeConcepts(this.db, rawConcepts);
+            coreId = result.core_id;
+            displayConcepts = result.display_labels;
+            // 覆盖 concepts 为归一化后的版本
+            distilledPayload.concepts = displayConcepts;
+            distilledPayload._core_id = coreId;
+            distilledPayload._raw_concepts = rawConcepts;
+            console.log(`[orchestrator-plugin] concepts normalized: ${rawConcepts.join(',')} → core_id=${coreId}`);
+          } catch (err) {
+            console.error(`[orchestrator-plugin] concept normalization failed:`, err);
+          }
+        }
+        // ── end KnowQL Knowledge ──
+
+        // 更新源 shell step 的 payload 为蒸馏版本
+        const distilledStr = JSON.stringify(distilledPayload);
+        this.db.prepare(
+          `UPDATE task_state SET payload = ?, updated_at = datetime('now')
+           WHERE run_id = ?`
+        ).run(distilledStr, sourceRunId);
+
+        // 标记蒸馏 agent 自身的 task_state 行（避免 scanAndNormalizeAgentConcepts 重复聚类）
+        this.db.prepare(
+          `UPDATE task_state
+           SET payload = json_set(payload, '$._core_id', ?),
+               updated_at = datetime('now')
+           WHERE run_id = ?`
+        ).run(coreId, distillRunId);
+
+        // 查找并更新继承此 step 的下游 queued step
+        const downstream = db.queryDownstreamQueuedTasks(this.db, sourceRunId);
+        for (const ds of downstream) {
+          this.db.prepare(
+            `UPDATE task_state
+             SET payload = json_set(?, '$._inherits_from_run_id', ?),
+                 updated_at = datetime('now')
+             WHERE run_id = ?`
+          ).run(distilledStr, sourceRunId, ds.run_id);
+          console.log(`[orchestrator-plugin] updated downstream queued ${ds.run_id}`);
+        }
+        console.log(`[orchestrator-plugin] distillation complete for ${sourceRunId}`);
+      }
+    } catch (err) {
+      console.error(`[orchestrator-plugin] distill handle error:`, err);
+    }
+  }
+
+  // ── 3.7 Phase D: Agent step concepts 聚类归一化 ─────────────
+  // 集成点 #3, #4, #5 — 详见 src/knowql-knowledge/INTEGRATION.md
+
+  private async scanAndNormalizeAgentConcepts(): Promise<void> {
+    try {
+      const rows = db.queryAgentStepsNeedingNormalization(this.db, 10);
+      for (const row of rows) {
+        const runId = row.run_id as string;
+        const payload = JSON.parse((row.payload as string) || "{}");
+        const concepts: string[] = payload.concepts || [];
+        if (concepts.length === 0) continue;
+        if (payload._core_id) continue; // 已经归一化过
+
+        try {
+          const result = await normalizeConcepts(this.db, concepts);
+          payload.concepts = result.display_labels;
+          payload._core_id = result.core_id;
+          payload._raw_concepts = concepts;
+
+          this.db.prepare(
+            `UPDATE task_state SET payload = ?, updated_at = datetime('now')
+             WHERE run_id = ?`
+          ).run(JSON.stringify(payload), runId);
+          console.log(`[orchestrator-plugin] agent concepts normalized: ${concepts.join(',')} → core_id=${result.core_id}`);
+        } catch (err) {
+          console.error(`[orchestrator-plugin] agent concept normalization failed for ${runId}:`, err);
+        }
+      }
+    } catch (err) {
+      console.error("[orchestrator-plugin] scanAndNormalizeAgentConcepts error:", err);
     }
   }
 
@@ -573,6 +880,14 @@ export class PatrolLoop {
       }
 
       let desc = parts.join("\n\n");
+
+      // ③.5 语义原语引导：默认注入，sub_step.semantic_reporting: false 可关闭
+      if (subStep.semantic_reporting !== false) {
+        const semGuide = loadSemanticPrimitives();
+        if (semGuide) {
+          desc = `${desc}\n\n${semGuide}`;
+        }
+      }
 
       // ④ KnowQL guide: append if enabled
       if (subStep.allow_payload_query) {
@@ -850,6 +1165,11 @@ export class PatrolLoop {
     } catch { /* empty */ }
 
     const merged = nextStep.inherit_payload ? currentPayload : {};
+
+    // Phase B: 记录继承来源（用于压缩 workflow 联动更新下游 queued step）
+    if (nextStep.inherit_payload) {
+      (merged as Record<string, unknown>)._inherits_from_run_id = task.run_id;
+    }
 
     // Phase 3c: serialize command_policy if present
     const commandPolicyJson = nextStep.command_policy != null

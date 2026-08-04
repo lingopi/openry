@@ -27,11 +27,20 @@ def _find_config_dir() -> Path:
 
 
 def load_big_step(name: str) -> dict[str, Any]:
-    """Load a big step YAML definition from .openry/workflows/{name}.yaml."""
+    """Load a big step YAML definition.
+
+    Search order: workflows/ (user override) → system/ (built-in default).
+    """
     config_dir = _find_config_dir()
-    yaml_path = config_dir / "workflows" / f"{name}.yaml"
-    if not yaml_path.exists():
-        raise FileNotFoundError(f"Workflow not found: {yaml_path}")
+    user_path = config_dir / "workflows" / f"{name}.yaml"
+    system_path = config_dir / "system" / f"{name}.yaml"
+
+    if user_path.exists():
+        yaml_path = user_path
+    elif system_path.exists():
+        yaml_path = system_path
+    else:
+        raise FileNotFoundError(f"Workflow not found: {user_path} (also checked system/)")
     with open(yaml_path) as f:
         return yaml.safe_load(f)
 
@@ -79,14 +88,14 @@ def get_next_sub_step(big_step: dict, current_id: str, route: str) -> dict[str, 
 
 
 def list_available_workflows() -> list[str]:
-    """List all available big_step YAML files."""
+    """List all available big_step YAML files (workflows/ + system/)."""
     config_dir = _find_config_dir()
-    workflows_dir = config_dir / "workflows"
-    if not workflows_dir.exists():
-        return []
-    return sorted(
-        p.stem for p in workflows_dir.glob("*.yaml")
-    )
+    names: set[str] = set()
+    for subdir in ("workflows", "system"):
+        d = config_dir / subdir
+        if d.exists():
+            names.update(p.stem for p in d.glob("*.yaml"))
+    return sorted(names)
 
 
 def list_available_compositions() -> list[str]:

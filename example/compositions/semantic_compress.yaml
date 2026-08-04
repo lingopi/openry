@@ -1,0 +1,7 @@
+name: semantic_compress
+version: "1.0"
+description: "内置语义蒸馏 workflow：读取 shell stdout → LLM 蒸馏 → 三层结构化 payload"
+
+big_steps:
+  - ref: semantic_compress
+    description: "读取原始 stdout → 语义蒸馏为 domain + primitive + index 三层"

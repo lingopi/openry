@@ -618,6 +618,11 @@ def cmd_status(args: argparse.Namespace) -> None:
         # ── Handle each status within the same transaction ──
 
         if status == "completed":
+            # Agent 自己总结上报 = 天然语义蒸馏完成
+            if "_compressed" not in payload_dict:
+                payload_dict["_compressed"] = True
+            payload_str = json.dumps(payload_dict, ensure_ascii=False)
+
             # 自动生成 payload_schema
             payload_schema = generate_payload_schema(payload_dict) if payload_dict else {}
             payload_schema_str = json.dumps(payload_schema, ensure_ascii=False)

@@ -16,6 +16,7 @@
   </div>
   <div class="nav-tabs" id="navTabs">
     <button class="nav-tab active" data-view="workflows">Workflows</button>
+    <button class="nav-tab" data-view="concepts">Concepts</button>
     <button class="nav-tab" data-view="history">运行历史</button>
     <button class="nav-tab" data-view="commands">命令历史</button>
     <button class="nav-tab" data-view="metrics">Metrics</button>
@@ -58,6 +59,29 @@
           </div>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- Concepts View -->
+  <section class="view" id="view-concepts">
+    <div class="panel-header">
+      <h2>🧠 Semantic Concepts</h2>
+      <span class="text-muted" style="font-size:13px;">自动从 Workflow 运行中提炼的概念标签</span>
+    </div>
+    <div class="table-container">
+      <table class="data-table" id="conceptsTable">
+        <thead>
+          <tr>
+            <th>标签</th>
+            <th>描述</th>
+            <th>引用次数</th>
+            <th>创建时间</th>
+          </tr>
+        </thead>
+        <tbody id="conceptsBody">
+          <tr><td colspan="4" class="empty-cell">Loading...</td></tr>
+        </tbody>
+      </table>
     </div>
   </section>
 
@@ -158,6 +182,7 @@
 <script src="/js/components/payload-viewer.js"></script>
 <script src="/js/components/trigger-panel.js"></script>
 <script src="/js/components/metrics-cards.js"></script>
+<script src="/js/components/concepts-view.js"></script>
 <script src="/js/components/transcript-viewer.js"></script>
 <script src="/js/app.js"></script>
 

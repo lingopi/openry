@@ -281,6 +281,32 @@ def _api_metrics(handler) -> None:
     })
 
 
+def _api_list_concepts(handler) -> None:
+    """List all semantic concept clusters (from Phase D KnowQL knowledge)."""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT core_id, display_labels, description, member_count, created_at "
+            "FROM clusters ORDER BY member_count DESC"
+        ).fetchall()
+        concepts = []
+        for r in rows:
+            labels = json.loads(r[1]) if r[1] else []
+            concepts.append({
+                "core_id": r[0],
+                "labels": labels,
+                "description": r[2] or "",
+                "member_count": r[3] or 0,
+                "created_at": r[4] or "",
+            })
+        _send_json(handler, {"concepts": concepts})
+    except Exception:
+        # clusters table may not exist yet (Phase D not initialized)
+        _send_json(handler, {"concepts": []})
+    finally:
+        conn.close()
+
+
 def _api_trigger(handler, body: dict) -> None:
     composition_name = body.get("workflow", "").strip()
     if not composition_name:
@@ -509,6 +535,9 @@ class APIHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/v1/metrics":
                 _api_metrics(self)
+                return
+            if path == "/api/v1/concepts":
+                _api_list_concepts(self)
                 return
             if path == "/api/v1/transcript":
                 _api_transcript(self, query)

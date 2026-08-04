@@ -59,6 +59,8 @@ export type SubStep = {
     allow_search?: boolean;
     allowed_intents?: string[];
   };
+  // Phase D: 语义蒸馏开关（默认 true，设为 false 则跳过 concepts 产出和聚类）
+  semantic_reporting?: boolean;
   // Phase 3b: kind=shell
   command?: string;
   timeout_seconds?: number;
@@ -117,7 +119,12 @@ function getConfigDir(): string {
 
 export function loadBigStep(name: string): BigStep {
   const configDir = getConfigDir();
-  const yamlPath = path.join(configDir, "workflows", `${name}.yaml`);
+  // 搜索顺序：workflows/（用户自定义优先）→ system/（内置默认）
+  const userPath = path.join(configDir, "workflows", `${name}.yaml`);
+  const systemPath = path.join(configDir, "system", `${name}.yaml`);
+  const yamlPath = fs.existsSync(userPath) ? userPath
+    : fs.existsSync(systemPath) ? systemPath
+    : userPath; // 都不存在时用 userPath，方便报错信息指向用户目录
   if (!fs.existsSync(yamlPath)) {
     throw new Error(`Workflow not found: ${yamlPath}`);
   }

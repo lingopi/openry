@@ -18,7 +18,7 @@
 
 // ── Allowed tools ──────────────────────────────────────────────
 
-const ALLOWED_TOOLS = new Set(["openry_run", "openry_status", "openry_payload_query"]);
+const ALLOWED_TOOLS = new Set(["openry_run", "openry_status", "openry_payload_query", "openry_knowledge_query"]);
 
 // ── Guidance messages for commonly intercepted tools ───────────
 

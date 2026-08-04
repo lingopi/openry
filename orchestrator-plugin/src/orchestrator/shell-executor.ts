@@ -87,6 +87,7 @@ export function buildStdoutPayload(
             extracted[key] = parsed[key];
           }
         }
+        extracted._compressed = false;
         return { payload: extracted };
       }
       // stdout 是合法 JSON 但不是 object（如 "hello" 或 [1,2,3]）
@@ -106,12 +107,16 @@ function handleParseFailure(
   onError?: "abort" | "fallback",
 ): { payload: Record<string, unknown>; overrideStatus: "dropped" | "completed" } {
   if (onError === "fallback") {
-    return { payload: { _stdout: stdout }, overrideStatus: "completed" };
+    return {
+      payload: { _stdout: stdout, _compressed: false },
+      overrideStatus: "completed",
+    };
   }
   return {
     payload: {
       _parse_error: "stdout is not a valid JSON object; payload_keys extraction failed",
       _stdout: stdout.slice(0, 500),
+      _compressed: false,
     },
     overrideStatus: "dropped",
   };
@@ -121,7 +126,10 @@ function buildRawPayload(
   stdout: string,
   opts?: { truncated?: boolean; originalSize?: number; overflow?: boolean },
 ): Record<string, unknown> {
-  const payload: Record<string, unknown> = { _stdout: stdout };
+  const payload: Record<string, unknown> = {
+    _stdout: stdout,
+    _compressed: false,       // shell 产出默认为未压缩，由蒸馏 workflow 后处理
+  };
   if (opts?.truncated) {
     payload._truncated = true;
     payload._original_size = opts.originalSize;

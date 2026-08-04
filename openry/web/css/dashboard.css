@@ -374,6 +374,34 @@ body {
 }
 .panel-header h2 { font-size: 16px; font-weight: 600; }
 
+/* ── Concepts tags & badges ─────────────────────── */
+.tag-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.tag {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--blue-bg);
+  border-radius: 12px;
+  white-space: nowrap;
+}
+.badge {
+  display: inline-block;
+  min-width: 24px;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  border-radius: 10px;
+}
+.badge-blue {
+  color: var(--accent);
+  background: var(--blue-bg);
+}
+.text-sm { font-size: 12px; }
+.text-red { color: var(--red); }
+
 /* ── Running animation ──────────────────────────── */
 @keyframes pulse {
   0%, 100% { opacity: 1; }

@@ -1,0 +1,32 @@
+# ============================================================================
+# semantic_compress — 内置 Shell 语义蒸馏 Workflow
+# ============================================================================
+# patrol loop 扫描到 _compressed: false 的 shell step 后，
+# spawn 此 workflow 的 distill agent 做语义蒸馏。
+#
+# 提示词由 buildTaskDescription() 统一构建：
+#   description（本文件） + semantic-primitives.md（自动注入）
+# ============================================================================
+name: semantic_compress
+version: "1.0"
+description: "读取 shell step 的原始 stdout，LLM 语义蒸馏为结构化 payload"
+timeout_minutes: 5
+max_retries: 0
+
+sub_steps:
+  - id: distill
+    kind: agent
+    description: |
+      ## 任务：语义蒸馏
+
+      上一步 shell 命令的原始输出已提供在上面。
+      请对原始输出内容做语义蒸馏，提取关键信息并组织为结构化数据。
+      {{payloadKeysSection}}
+
+      蒸馏完成后，通过 openry_status completed 上报结果。
+      上报的 payload 中必须包含：
+      - _compressed: true
+    on_success: done
+    on_failure: abort
+    max_tool_calls: 10
+    expect_payload: true
