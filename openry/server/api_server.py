@@ -609,13 +609,13 @@ class APIHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(f"data: {msg}\n\n".encode())
                     self.wfile.flush()
                 except Exception:
-                    # Timeout or empty — send heartbeat
+                    # Timeout — send heartbeat, but ignore any write errors
                     try:
                         self.wfile.write(b": heartbeat\n\n")
                         self.wfile.flush()
                     except Exception:
-                        break  # client disconnected
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                        break
+        except Exception:
             pass
         finally:
             event_bus.unsubscribe(sub_id)
