@@ -93,17 +93,53 @@ if (-not $SkipPython) {
     $pythonCmd = $null
     $pythonPath = $null
 
-    # ── Step 1: Try PATH (python3, python, py launcher) ──
-    foreach ($candidate in @("python3", "python", "py")) {
-        $found = Get-Command $candidate -ErrorAction SilentlyContinue
-        if ($found) {
-            $pythonCmd = $candidate
-            $pythonPath = $found.Source
-            break
+    # ── Step 1: Try py launcher (most reliable on Windows) ──
+    $pyExe = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyExe -and $pyExe.Source -notmatch "WindowsApps") {
+        $pythonCmd = "py"
+        $pythonPath = $pyExe.Source
+    }
+
+    # ── Step 2: Try python / python3, but skip Windows Store stubs ──
+    if (-not $pythonCmd) {
+        foreach ($candidate in @("python3", "python")) {
+            $found = Get-Command $candidate -ErrorAction SilentlyContinue
+            if ($found -and $found.Source -notmatch "WindowsApps") {
+                $pythonCmd = $candidate
+                $pythonPath = $found.Source
+                break
+            }
         }
     }
 
-    # ── Step 2: Scan common install directories ──
+    # ── Step 3: Check Windows Registry for installed Pythons ──
+    if (-not $pythonCmd) {
+        $regPaths = @(
+            "HKLM:\SOFTWARE\Python\PythonCore\*\InstallPath",
+            "HKCU:\SOFTWARE\Python\PythonCore\*\InstallPath"
+        )
+        $regVersions = @()
+        foreach ($rp in $regPaths) {
+            $items = Get-ItemProperty -Path $rp -ErrorAction SilentlyContinue
+            if ($items) { $regVersions += $items }
+        }
+        if ($regVersions.Count -gt 0) {
+            # Pick newest version
+            $bestReg = $regVersions | Sort-Object PSPath -Descending | Select-Object -First 1
+            $regPyExe = Join-Path $bestReg.'(default)' "python.exe"
+            if (Test-Path $regPyExe) {
+                $pythonCmd = $regPyExe
+                $pythonPath = $regPyExe
+                Write-Warn "Python found via registry: $pythonPath (not on PATH — fixing...)"
+                $pyDir = Split-Path -Parent $pythonPath
+                $env:Path = "$pyDir;$env:Path"
+                $scriptsDir = Join-Path $pyDir "Scripts"
+                if (Test-Path $scriptsDir) { $env:Path = "$scriptsDir;$env:Path" }
+            }
+        }
+    }
+
+    # ── Step 4: Scan common install directories ──
     if (-not $pythonCmd) {
         $searchDirs = @(
             "$env:LOCALAPPDATA\Programs\Python",
@@ -116,24 +152,19 @@ if (-not $SkipPython) {
                        Where-Object { $_.FullName -notmatch "WindowsApps" }
             if ($matches) { $candidates += $matches }
         }
-        # Pick the highest version
         $best = $candidates | Sort-Object FullName -Descending | Select-Object -First 1
         if ($best) {
             $pythonCmd = $best.FullName
             $pythonPath = $best.FullName
             Write-Warn "Python found at $pythonPath (not on PATH — fixing...)"
-            # Add to current session PATH
             $pyDir = Split-Path -Parent $pythonPath
             $env:Path = "$pyDir;$env:Path"
-            # Also add Scripts (for pip)
             $scriptsDir = Join-Path $pyDir "Scripts"
-            if (Test-Path $scriptsDir) {
-                $env:Path = "$scriptsDir;$env:Path"
-            }
+            if (Test-Path $scriptsDir) { $env:Path = "$scriptsDir;$env:Path" }
         }
     }
 
-    # ── Step 3: Validate or install ──
+    # ── Step 5: Validate or install ──
     $pythonOk = $false
     if ($pythonCmd) {
         try {
