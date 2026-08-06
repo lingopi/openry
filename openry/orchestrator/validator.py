@@ -1,4 +1,19 @@
-"""Phase 3a: Unified validation engine for conditional routing.
+# ============================================================================
+#  DEPRECATED — 2026-08-05
+#
+#  This Python Orchestrator module is NO LONGER MAINTAINED.
+#  All workflow orchestration has moved to the TypeScript orchestrator-plugin:
+#      orchestrator-plugin/src/orchestrator/validation.ts
+#      orchestrator-plugin/src/orchestrator/router.ts
+#
+#  The TS plugin has its own validation + routing implementation.
+#  This Python version is kept for reference only.
+#
+#  DO NOT develop new features or fix bugs here.
+#  If you're an agent reading this: STOP. Go to orchestrator-plugin/ instead.
+# ============================================================================
+
+"""Phase 3a: Unified validation engine for conditional routing — DEPRECATED.
 
 Provides 9 validation types with a common interface. Completely independent
 of Phase 2's validation.py — that module continues to serve the legacy

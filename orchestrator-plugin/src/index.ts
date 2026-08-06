@@ -94,7 +94,7 @@ import { loadComposition, loadBigStep, getSubStepConfig } from "./orchestrator/y
 
 // ── service ────────────────────────────────────────────────────
 
-import { createOrchestratorService } from "./orchestrator/service.js";
+import { createOrchestratorService, orchestratorConfig } from "./orchestrator/service.js";
 
 // ── plugin entry ───────────────────────────────────────────────
 
@@ -167,7 +167,7 @@ const plugin = {
               `${OPENRY_CLI} -c "${escapeShell(command)}"`,
               {
                 env: execEnv,
-                timeout: 300_000,
+                timeout: orchestratorConfig.commandTimeoutMs,
                 encoding: "utf-8",
                 maxBuffer: 10 * 1024 * 1024,
               },

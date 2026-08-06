@@ -46,7 +46,7 @@ def run_command(
     command: str,
     *,
     cwd: str | None = None,
-    timeout: int = 300,
+    timeout: int = 600,
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Execute a shell command and return structured result.

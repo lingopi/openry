@@ -817,7 +817,7 @@ export class PatrolLoop {
       const proc = spawn(this.config.openclawPath, [
         "agent", "--agent", this.config.agentId,
         "--session-key", sessionKey, "--message", description,
-        "--json", "--timeout", "600",
+        "--json", "--timeout", "0",
       ], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env,
         PATH: [
           process.env.PATH || '/usr/bin:/bin',
@@ -830,6 +830,16 @@ export class PatrolLoop {
       this.activeRuns.set(runId, proc);
       proc.on("close", (code) => {
         this.activeRuns.delete(runId); this.pool.release();
+        // Log exit code to DB for debugging timeout behavior
+        try {
+          this.db.prepare(
+            `INSERT INTO commands_log (run_id, workflow, step_id, command, shell, cwd, exit_code, stdout, stderr, duration_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).run(runId, workflow, subStepId, '[openclaw agent exit]', 'node', '.',
+                 code ?? -1,
+                 `exit_code=${code} signal=${proc.signalCode ?? 'none'}`,
+                 proc.signalCode ?? '', 0);
+        } catch { /* best-effort */ }
         if (code !== 0) db.updateTaskStatus(this.db, runId, "failed");
         console.log(`[orchestrator] run ${runId} completed (exit ${code})`);
       });

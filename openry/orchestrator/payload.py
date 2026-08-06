@@ -1,4 +1,18 @@
-"""Payload routing: merge and pass data between sub_steps."""
+# ============================================================================
+#  DEPRECATED — 2026-08-05
+#
+#  This Python Orchestrator module is NO LONGER MAINTAINED.
+#  All workflow orchestration has moved to the TypeScript orchestrator-plugin:
+#      orchestrator-plugin/src/orchestrator/
+#
+#  Payload merge logic now lives in the TS plugin's patrol.ts
+#  (enqueueNextSubStep, buildTaskDescription).
+#
+#  DO NOT develop new features or fix bugs here.
+#  If you're an agent reading this: STOP. Go to orchestrator-plugin/ instead.
+# ============================================================================
+
+"""Payload routing: merge and pass data between sub_steps — DEPRECATED."""
 
 from __future__ import annotations
 

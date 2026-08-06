@@ -1,4 +1,18 @@
-"""Hard-code validation engine for sub_step results."""
+# ============================================================================
+#  DEPRECATED — 2026-08-05
+#
+#  This Python Orchestrator module is NO LONGER MAINTAINED.
+#  All workflow orchestration has moved to the TypeScript orchestrator-plugin:
+#      orchestrator-plugin/src/orchestrator/validation.ts
+#
+#  The TS plugin has its own validation implementation (8 validation types).
+#  This Python version is kept for reference only.
+#
+#  DO NOT develop new features or fix bugs here.
+#  If you're an agent reading this: STOP. Go to orchestrator-plugin/ instead.
+# ============================================================================
+
+"""Hard-code validation engine for sub_step results — DEPRECATED."""
 
 from __future__ import annotations
 

@@ -195,7 +195,39 @@ Minimal Python dependency: `pyyaml`. Everything else is Python standard library.
 - **[Compositions & Workflows Guide](docs/compositions-and-workflows-guide.md)** — AI-readable prompt covering all YAML fields, validation rules, routing, and best practices
 - **[Design Documents](design/)** — Architecture decisions for each development phase
 - **[Pitfalls](docs/pitfalls.md)** — Common mistakes and lessons learned
+- **[Timeout Mechanism](docs/timeout-mechanism.md)** — 🔬 实测验证的超时机制文档（三层超时、心跳、竞态条件、已知问题）
+## Plugin Configuration
 
+在 `~/.openclaw/openclaw.json` 中配置 orchestrator-plugin 参数（全部可选，不写则用默认值）：
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "orchestrator-plugin": {
+        "enabled": true,
+        "config": {
+          "maxWorkers": 3,
+          "patrolIntervalMs": 5000,
+          "zombieTimeoutMinutes": 10,
+          "graceShutdownSeconds": 10,
+          "commandTimeoutSeconds": 600,
+          "openryDir": "~/.openry"
+        }
+      }
+    }
+  }
+}
+```
+
+| 参数 | 默认值 | 说明 |
+|------|:---:|------|
+| `maxWorkers` | 3 | 同时运行的 agent session 最大数量 |
+| `patrolIntervalMs` | 5000 | 巡查循环间隔（毫秒），每轮扫描 12 步 |
+| `zombieTimeoutMinutes` | 10 | 僵尸检测阈值——agent 此时间内无活动即被杀 |
+| `graceShutdownSeconds` | 10 | 停止时的优雅退出等待时间 |
+| `commandTimeoutSeconds` | 600 | `openry_run` 单次命令执行超时（秒） |
+| `openryDir` | `~/.openry` | OpenRY 数据目录（DB、workflow YAML、配置） |
 ## License
 
 MIT © OpenRY Contributors

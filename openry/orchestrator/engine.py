@@ -1,4 +1,23 @@
-"""Orchestrator engine: patrol loop, subprocess management, retry logic."""
+# ============================================================================
+#  DEPRECATED — 2026-08-05
+#
+#  This Python Orchestrator engine is NO LONGER MAINTAINED.
+#  All workflow orchestration has moved to the TypeScript orchestrator-plugin:
+#      orchestrator-plugin/src/orchestrator/patrol.ts  (patrol loop)
+#      orchestrator-plugin/src/orchestrator/worker-pool.ts (concurrency)
+#
+#  The TS plugin runs as an OpenClaw SDK Service and is the ONLY active
+#  orchestrator. This Python engine is kept for reference only.
+#
+#  DO NOT:
+#    - Develop new features here
+#    - Fix bugs here (fix them in the TS plugin instead)
+#    - Use this in production
+#
+#  If you're an agent reading this: STOP. Go to orchestrator-plugin/ instead.
+# ============================================================================
+
+"""Orchestrator engine: patrol loop, subprocess management, retry logic — DEPRECATED."""
 
 from __future__ import annotations
 

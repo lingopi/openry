@@ -22,7 +22,7 @@ DEFAULTS: dict[str, Any] = {
         "max_stderr_chars": 102400,
     },
     "timeout": {
-        "default": 300,
+        "default": 600,
     },
 }
 

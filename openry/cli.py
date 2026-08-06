@@ -468,7 +468,7 @@ def cmd_execute(args: argparse.Namespace) -> None:
     result = run_command(
         command,
         cwd=args.cwd,
-        timeout=args.timeout if args.timeout else 300,
+        timeout=args.timeout if args.timeout else 600,
         extra_env=extra_env,
     )
     elapsed_ms = int((time.perf_counter() - start) * 1000)

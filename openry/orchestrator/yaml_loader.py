@@ -1,4 +1,18 @@
-"""YAML loader for workflow and composition configurations."""
+# ============================================================================
+#  DEPRECATED — 2026-08-05
+#
+#  This Python Orchestrator module is NO LONGER MAINTAINED.
+#  All workflow orchestration has moved to the TypeScript orchestrator-plugin:
+#      orchestrator-plugin/src/orchestrator/yaml-loader.ts
+#
+#  The TS plugin has its own YAML loading implementation (loadBigStep,
+#  loadComposition, getSubStepConfig, etc.) with identical semantics.
+#
+#  DO NOT develop new features or fix bugs here.
+#  If you're an agent reading this: STOP. Go to orchestrator-plugin/ instead.
+# ============================================================================
+
+"""YAML loader for workflow and composition configurations — DEPRECATED."""
 
 from __future__ import annotations
 

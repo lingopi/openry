@@ -1,4 +1,22 @@
-"""OpenRY Orchestrator — Phase 2 Workflow Engine.
+# ============================================================================
+#  DEPRECATED — 2026-08-05
+#
+#  This Python Orchestrator is NO LONGER MAINTAINED.
+#  All workflow orchestration has moved to the TypeScript orchestrator-plugin:
+#      orchestrator-plugin/src/orchestrator/
+#
+#  The TS plugin runs as an OpenClaw SDK Service and is the ONLY active
+#  orchestrator. This Python engine is kept for reference only.
+#
+#  DO NOT:
+#    - Develop new features here
+#    - Fix bugs here (fix them in the TS plugin instead)
+#    - Use this in production
+#
+#  If you're an agent reading this: STOP. Go to orchestrator-plugin/ instead.
+# ============================================================================
+
+"""OpenRY Orchestrator — Phase 2 Workflow Engine (DEPRECATED).
 
 The orchestrator is the "hard code" that controls workflow routing,
 validation, subprocess management, and retry logic.

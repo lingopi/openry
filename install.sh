@@ -5,7 +5,7 @@
 # Platforms:
 #   macOS   ✅  (primary, tested on Apple Silicon + Intel)
 #   Linux   ✅  (supported)
-#   Windows ❌  (install.ps1 planned — see manual instructions below)
+#   Windows ✅  (install.ps1 — see that file)
 #
 # Windows users — install manually for now:
 #   1. Install Python 3.9+:  winget install Python.Python.3.12
