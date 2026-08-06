@@ -90,7 +90,7 @@ def validate_step(run_id: str, step_config: dict[str, Any]) -> tuple[bool, str]:
                 passed = False
                 reason = f"file not found: {path}"
             else:
-                with open(path) as f:
+                with open(path, encoding="utf-8") as f:
                     passed = rule["contains"] in f.read()
                 reason = "" if passed else f"missing content: {rule['contains']}"
 

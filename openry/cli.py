@@ -243,7 +243,7 @@ def _validate_payload(run_id: str, payload: dict, step_config: dict) -> tuple[bo
             path = rule["path"]
             if not _os.path.exists(path):
                 return False, f"文件不存在: {path}"
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 if rule["contains"] not in f.read():
                     return False, f"文件内容不包含: {rule['contains']}"
 

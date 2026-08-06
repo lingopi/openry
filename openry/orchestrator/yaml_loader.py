@@ -55,7 +55,7 @@ def load_big_step(name: str) -> dict[str, Any]:
         yaml_path = system_path
     else:
         raise FileNotFoundError(f"Workflow not found: {user_path} (also checked system/)")
-    with open(yaml_path) as f:
+    with open(yaml_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -65,7 +65,7 @@ def load_composition(name: str) -> dict[str, Any]:
     yaml_path = config_dir / "compositions" / f"{name}.yaml"
     if not yaml_path.exists():
         raise FileNotFoundError(f"Composition not found: {yaml_path}")
-    with open(yaml_path) as f:
+    with open(yaml_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

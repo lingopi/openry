@@ -628,9 +628,9 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 def run_server(host: str = "127.0.0.1", port: int = 9100) -> None:
     """Start the HTTP API server (blocking)."""
     server = ThreadingHTTPServer((host, port), APIHandler)
-    print(f"\n  🚀 OpenRY Dashboard running at http://{host}:{port}\n")
+    print(f"\n  OpenRY Dashboard running at http://{host}:{port}\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n  👋 Shutting down...")
+        print("\n  Shutting down...")
         server.shutdown()
