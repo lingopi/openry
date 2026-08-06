@@ -90,32 +90,74 @@ Write-Host ""
 # ═══════════════════════════════════════════════════════════════════════
 
 if (-not $SkipPython) {
-    # Try common Python command names
     $pythonCmd = $null
-    foreach ($candidate in @("python3", "python")) {
+    $pythonPath = $null
+
+    # ── Step 1: Try PATH (python3, python, py launcher) ──
+    foreach ($candidate in @("python3", "python", "py")) {
         $found = Get-Command $candidate -ErrorAction SilentlyContinue
         if ($found) {
             $pythonCmd = $candidate
+            $pythonPath = $found.Source
             break
         }
     }
 
+    # ── Step 2: Scan common install directories ──
+    if (-not $pythonCmd) {
+        $searchDirs = @(
+            "$env:LOCALAPPDATA\Programs\Python",
+            "$env:PROGRAMFILES\Python*",
+            "C:\Python*"
+        )
+        $candidates = @()
+        foreach ($dir in $searchDirs) {
+            $matches = Get-ChildItem -Path $dir -Filter "python.exe" -Recurse -ErrorAction SilentlyContinue |
+                       Where-Object { $_.FullName -notmatch "WindowsApps" }
+            if ($matches) { $candidates += $matches }
+        }
+        # Pick the highest version
+        $best = $candidates | Sort-Object FullName -Descending | Select-Object -First 1
+        if ($best) {
+            $pythonCmd = $best.FullName
+            $pythonPath = $best.FullName
+            Write-Warn "Python found at $pythonPath (not on PATH — fixing...)"
+            # Add to current session PATH
+            $pyDir = Split-Path -Parent $pythonPath
+            $env:Path = "$pyDir;$env:Path"
+            # Also add Scripts (for pip)
+            $scriptsDir = Join-Path $pyDir "Scripts"
+            if (Test-Path $scriptsDir) {
+                $env:Path = "$scriptsDir;$env:Path"
+            }
+        }
+    }
+
+    # ── Step 3: Validate or install ──
     $pythonOk = $false
     if ($pythonCmd) {
         try {
             $pyVer = & $pythonCmd --version 2>&1
-            Write-OK "Python found: $pyVer"
+            $pyVerStr = "$pyVer".Trim()
+            Write-OK "Python found: $pyVerStr  ($pythonPath)"
             $pythonOk = $true
         } catch {
-            Write-Warn "python command exists but failed to run"
+            Write-Warn "python found at $pythonCmd but failed to run: $_"
         }
     }
 
     if (-not $pythonOk) {
-        Write-Warn "Python 3.9+ not found. Installing via winget..."
+        Write-Warn "Python 3.9+ not found on PATH or in common install locations."
+        Write-Host ""
+        Write-Host "  Possible causes:"
+        Write-Host "    1. Python is not installed → will try winget install now"
+        Write-Host "    2. Python is installed but not on PATH → check manually:"
+        Write-Host "       Look in: $env:LOCALAPPDATA\Programs\Python\"
+        Write-Host "       Or run: where.exe python"
+        Write-Host ""
         try {
             winget install --id Python.Python.3.12 --exact --accept-source-agreements --accept-package-agreements
-            Write-OK "Python 3.12 installed"
+            Write-OK "Python 3.12 installed via winget"
             $pythonCmd = "python"
             # Refresh PATH
             $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
