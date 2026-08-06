@@ -610,9 +610,12 @@ class APIHandler(SimpleHTTPRequestHandler):
                     self.wfile.flush()
                 except Exception:
                     # Timeout or empty — send heartbeat
-                    self.wfile.write(b": heartbeat\n\n")
-                    self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+                    try:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                    except Exception:
+                        break  # client disconnected
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass
         finally:
             event_bus.unsubscribe(sub_id)
