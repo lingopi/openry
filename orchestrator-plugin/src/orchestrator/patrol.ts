@@ -184,6 +184,7 @@ export class PatrolLoop {
   private config: PatrolConfig;
   private running = false;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private _conceptNormalizing = false; // guard against overlapping scanAndNormalizeAgentConcepts calls
 
   constructor(database: Database.Database, config: PatrolConfig) {
     this.db = database;
@@ -576,6 +577,10 @@ export class PatrolLoop {
   // 集成点 #3, #4, #5 — 详见 src/knowql-knowledge/INTEGRATION.md
 
   private async scanAndNormalizeAgentConcepts(): Promise<void> {
+    // Guard: skip if previous call is still in-flight (can happen on slow
+    // platforms where model loading or embedding exceeds patrol interval).
+    if (this._conceptNormalizing) return;
+    this._conceptNormalizing = true;
     try {
       const rows = db.queryAgentStepsNeedingNormalization(this.db, 10);
       for (const row of rows) {
@@ -602,6 +607,8 @@ export class PatrolLoop {
       }
     } catch (err) {
       console.error("[orchestrator-plugin] scanAndNormalizeAgentConcepts error:", err);
+    } finally {
+      this._conceptNormalizing = false;
     }
   }
 

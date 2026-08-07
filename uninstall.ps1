@@ -129,7 +129,27 @@ Write-Host ""
 $removeData = $All -and -not $KeepData
 if ($removeData) {
     Write-Host "═══ 6. Removing .openry (DB + workflows) ═══" -ForegroundColor Red
+
+    # Kill any process holding openry.db lock before deletion
+    try {
+        Get-Process -Name "python*" -ErrorAction SilentlyContinue | ForEach-Object {
+            try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        Start-Sleep -Milliseconds 500
+        Write-OK "Stopped Python processes"
+    } catch { }
+
     if (Test-Path $OpenryHome) {
+        # Try individual file removal first (DB files often locked)
+        $dbFiles = @("openry.db", "openry.db-wal", "openry.db-shm")
+        foreach ($f in $dbFiles) {
+            $fp = Join-Path $OpenryHome $f
+            if (Test-Path $fp) {
+                try { Remove-Item -Force $fp -ErrorAction Stop; Write-OK "Removed $f" }
+                catch { Write-Err "Cannot remove $f (still locked): $_" }
+            }
+        }
+        # Then remove the rest of the directory
         try { Remove-Item -Recurse -Force $OpenryHome -ErrorAction Stop; Write-OK "Removed $OpenryHome" }
         catch { Write-Err "Failed: $_" }
     } else { Write-Info "Not found" }

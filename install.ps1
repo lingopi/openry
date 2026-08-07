@@ -289,6 +289,15 @@ New-Item -ItemType Directory -Force -Path "$OpenryHome\workflows"      | Out-Nul
 New-Item -ItemType Directory -Force -Path "$OpenryHome\compositions"   | Out-Null
 New-Item -ItemType Directory -Force -Path "$OpenryHome\prompts"        | Out-Null
 New-Item -ItemType Directory -Force -Path "$OpenryHome\prompt_blocks"  | Out-Null
+
+# Clean stale DB from previous install (fresh start)
+$dbFiles = @("openry.db", "openry.db-wal", "openry.db-shm")
+foreach ($f in $dbFiles) {
+    $fp = Join-Path $OpenryHome $f
+    if (Test-Path $fp) {
+        try { Remove-Item -Force $fp -ErrorAction SilentlyContinue } catch {}
+    }
+}
 Write-OK "Initialized $OpenryHome (workflows/ + compositions/ + prompts/ + prompt_blocks/)"
 Write-Host ""
 
@@ -459,21 +468,31 @@ with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f
                     Write-Warn "Agent registration failed (may already exist)"
                 }
 
-                # ── Install BGE-M3 model from GitHub Release ──
+                # ── Install BGE-M3 model (local file or GitHub Release) ──
                 Write-Host "  Installing BGE-M3 embedding model (one-time, ~400MB)..."
                 $bgeVersion = "bge-m3-v1.0"
                 $bgeFile = "bge-m3-offline.tar.gz"
-                $bgeUrl = "https://ghfast.top/https://github.com/lingopi/openry/releases/download/$bgeVersion/$bgeFile"
+                $bgeLocal = "$ScriptDir\$bgeFile"
                 $bgeTmp = "$env:TEMP\$bgeFile"
                 $bgeExtract = "$env:TEMP\bge-m3-extract"
                 $hfCache = "$env:USERPROFILE\.cache\huggingface\hub"
                 try {
-                    # Use curl (reliable for large files) instead of Invoke-WebRequest
-                    curl -L -o $bgeTmp $bgeUrl --connect-timeout 30 --max-time 600 2>&1 | Out-Null
-                    if ($LASTEXITCODE -ne 0) { throw "curl exit code $LASTEXITCODE" }
+                    # Prefer local file if present
+                    if (Test-Path $bgeLocal) {
+                        Write-Host "    Using local file: $bgeLocal"
+                        $sourceFile = $bgeLocal
+                        $localMode = $true
+                    } else {
+                        $bgeUrl = "https://ghfast.top/https://github.com/lingopi/openry/releases/download/$bgeVersion/$bgeFile"
+                        Write-Host "    Downloading from: $bgeUrl"
+                        curl -L -o $bgeTmp $bgeUrl --connect-timeout 30 --max-time 600 2>&1 | Out-Null
+                        if ($LASTEXITCODE -ne 0) { throw "curl exit code $LASTEXITCODE" }
+                        $sourceFile = $bgeTmp
+                        $localMode = $false
+                    }
                     Remove-Item -Recurse -Force $bgeExtract -ErrorAction SilentlyContinue
                     New-Item -ItemType Directory -Force $bgeExtract | Out-Null
-                    tar -xzf $bgeTmp -C $bgeExtract
+                    tar -xzf $sourceFile -C $bgeExtract
                     # Extract the inner model tar.gz to HF cache
                     $modelTar = Get-ChildItem -Path $bgeExtract -Recurse -Filter "bge-m3-model.tar.gz" | Select-Object -First 1
                     if ($modelTar) {
@@ -483,13 +502,15 @@ with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f
                     } else {
                         # Flat structure: extract directly
                         New-Item -ItemType Directory -Force $hfCache | Out-Null
-                        tar -xzf $bgeTmp -C $hfCache --strip-components=1 2>$null
+                        tar -xzf $sourceFile -C $hfCache --strip-components=1 2>$null
                         Write-OK "BGE-M3 model installed"
                     }
                 } catch {
-                    Write-Warn "BGE-M3 download failed (will download on first use)"
+                    Write-Warn "BGE-M3 install failed (will download on first use)"
                 } finally {
-                    Remove-Item $bgeTmp -Force -ErrorAction SilentlyContinue
+                    if (-not $localMode) {
+                        Remove-Item $bgeTmp -Force -ErrorAction SilentlyContinue
+                    }
                     Remove-Item -Recurse -Force $bgeExtract -ErrorAction SilentlyContinue
                 }
             } catch {
