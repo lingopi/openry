@@ -342,7 +342,7 @@ def _find_session_id(run_id: str) -> str | None:
     if not sessions_json.exists():
         return None
     try:
-        data = json.loads(sessions_json.read_text())
+        data = json.loads(sessions_json.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -368,7 +368,7 @@ def _parse_transcript(jsonl_path: Path, after_line: int = 0) -> tuple[list[dict]
         return messages, 0
 
     try:
-        all_lines = jsonl_path.read_text().splitlines()
+        all_lines = jsonl_path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return messages, 0
 

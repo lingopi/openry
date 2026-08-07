@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { Type } from "typebox";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { textResult } from "openclaw/plugin-sdk/tool-results";
@@ -29,19 +29,56 @@ function parseSessionKey(sessionKey?: string) {
 // Use "openry" from PATH; users install openry via pip which puts it on PATH.
 const OPENRY_CLI = "openry";
 
-function buildPath(): string {
-  const home = process.env.HOME || "";
-  const parts = [
-    process.env.PATH || "/usr/bin:/bin",
-    "/usr/local/bin",
-    home ? `${home}/bin` : "",
-    home ? `${home}/.local/bin` : "",
-    "/opt/homebrew/bin",
-  ].filter(Boolean);
-  return parts.join(":");
+// ── cross-platform CLI execution ────────────────────────────────
+
+const _isWindows = process.platform === "win32";
+
+/**
+ * Execute an openry CLI command.
+ * Windows: spawnSync pwsh directly (bypasses cmd.exe and its broken quoting).
+ * Unix: execSync (sh handles single quotes natively).
+ */
+function execOpenry(cliArgs: string, env: Record<string, string | undefined>, timeoutMs: number): string {
+  if (_isWindows) {
+    const r = spawnSync("pwsh", [
+      "-NoProfile", "-NonInteractive", "-Command",
+      `${OPENRY_CLI} ${cliArgs}`,
+    ], {
+      env,
+      timeout: timeoutMs,
+      encoding: "utf-8",
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    if (r.error) throw r.error;
+    if (r.status !== 0) {
+      const err: any = new Error(`openry exited with code ${r.status}`);
+      err.stdout = r.stdout;
+      err.stderr = r.stderr;
+      throw err;
+    }
+    return r.stdout;
+  }
+  return execSync(
+    `${OPENRY_CLI} ${cliArgs}`,
+    { env, timeout: timeoutMs, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 },
+  );
 }
 
+// ── PATH 构建 (跨平台) ──────────────────────────────────────────
+
+import { buildPath as _buildPath } from "./orchestrator/spawn-helper.js";
+
+function buildPath(): string {
+  return _buildPath();
+}
+
+// ── shell 转义 (跨平台) ─────────────────────────────────────────
+
 function escapeShell(cmd: string): string {
+  if (_isWindows) {
+    // pwsh: inside double quotes, escape " with `"
+    return cmd.replace(/`/g, "``").replace(/"/g, '`"');
+  }
   return cmd.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
@@ -163,14 +200,10 @@ const plugin = {
               OPENRY_AGENT_ID: agent_id,
               OPENRY_SESSION_KEY: sessionKey,
             };
-            const stdout = execSync(
-              `${OPENRY_CLI} -c "${escapeShell(command)}"`,
-              {
-                env: execEnv,
-                timeout: orchestratorConfig.commandTimeoutMs,
-                encoding: "utf-8",
-                maxBuffer: 10 * 1024 * 1024,
-              },
+            const stdout = execOpenry(
+              `-c "${escapeShell(command)}"`,
+              execEnv,
+              orchestratorConfig.commandTimeoutMs,
             );
             return textResult(stdout, null);
           } catch (err: unknown) {
@@ -229,13 +262,10 @@ const plugin = {
               OPENRY_AGENT_ID: agent_id,
               OPENRY_SESSION_KEY: sessionKey,
             };
-            const stdout = execSync(
-              `${OPENRY_CLI} --status ${status} --payload '${payloadJson.replace(/'/g, "'\\''")}'`,
-              {
-                env: execEnv,
-                timeout: 10_000,
-                encoding: "utf-8",
-              },
+            const stdout = execOpenry(
+              `--status ${status} --payload '${payloadJson}'`,
+              execEnv,
+              10_000,
             );
             return textResult(stdout.trim() || `Status updated: ${status}`, null);
           } catch (err: unknown) {

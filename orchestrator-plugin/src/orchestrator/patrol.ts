@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { buildPath, spawnOpenclaw, spawnShellScript } from "./spawn-helper.js";
 import Database from "better-sqlite3";
 import { WorkerPool } from "./worker-pool.js";
 import { validateStep, type StepConfig } from "./validation.js";
@@ -183,6 +184,7 @@ export class PatrolLoop {
   private config: PatrolConfig;
   private running = false;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private _conceptNormalizing = false; // guard against overlapping scanAndNormalizeAgentConcepts calls
 
   constructor(database: Database.Database, config: PatrolConfig) {
     this.db = database;
@@ -470,19 +472,13 @@ export class PatrolLoop {
       }
 
       this.pool.acquire();
-      const proc = spawn(this.config.openclawPath, [
+      const proc = spawnOpenclaw([
         "agent", "--agent", this.config.agentId,
         "--session-key", sessionKey, "--message", desc,
         "--json", "--timeout", "300",
       ], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env,
         OPENRY_RUN_ID: distillRunId,
-        PATH: [
-          process.env.PATH || '/usr/bin:/bin',
-          '/usr/local/bin',
-          `${process.env.HOME}/bin`,
-          `${process.env.HOME}/.local/bin`,
-          '/opt/homebrew/bin',
-        ].join(':'),
+        PATH: buildPath(),
       } });
       this.activeRuns.set(distillRunId, proc);
       proc.on("close", async (code) => {
@@ -581,6 +577,10 @@ export class PatrolLoop {
   // 集成点 #3, #4, #5 — 详见 src/knowql-knowledge/INTEGRATION.md
 
   private async scanAndNormalizeAgentConcepts(): Promise<void> {
+    // Guard: skip if previous call is still in-flight (can happen on slow
+    // platforms where model loading or embedding exceeds patrol interval).
+    if (this._conceptNormalizing) return;
+    this._conceptNormalizing = true;
     try {
       const rows = db.queryAgentStepsNeedingNormalization(this.db, 10);
       for (const row of rows) {
@@ -607,6 +607,8 @@ export class PatrolLoop {
       }
     } catch (err) {
       console.error("[orchestrator-plugin] scanAndNormalizeAgentConcepts error:", err);
+    } finally {
+      this._conceptNormalizing = false;
     }
   }
 
@@ -682,16 +684,9 @@ export class PatrolLoop {
     try {
       this.pool.acquire();
 
-      const proc = spawn(command, [], {
-        shell: true,
+      const proc = spawnShellScript(command, {
         env: { ...process.env, ...subStep.env,
-          PATH: [
-            process.env.PATH || '/usr/bin:/bin',
-            '/usr/local/bin',
-            `${process.env.HOME}/bin`,
-            `${process.env.HOME}/.local/bin`,
-            '/opt/homebrew/bin',
-          ].join(':'),
+          PATH: buildPath(),
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -811,23 +806,21 @@ export class PatrolLoop {
     const subStepId = (task.sub_step_id as string) || "";
     const workflow = (task.workflow as string) || "";
     const description = this.buildTaskDescription(task);
-    const sessionKey = buildSessionKey(workflow, subStepId, runId);
+    const sessionKey = buildSessionKey(workflow, subStepId, runId, this.config.agentId);
     try {
       this.pool.acquire();
-      const proc = spawn(this.config.openclawPath, [
+      const proc = spawnOpenclaw([
         "agent", "--agent", this.config.agentId,
         "--session-key", sessionKey, "--message", description,
         "--json", "--timeout", "0",
       ], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env,
-        PATH: [
-          process.env.PATH || '/usr/bin:/bin',
-          '/usr/local/bin',
-          `${process.env.HOME}/bin`,
-          `${process.env.HOME}/.local/bin`,     // pip --user + wrapper target
-          '/opt/homebrew/bin',                  // Apple Silicon Homebrew
-        ].join(':'),
+        PATH: buildPath(),
       } });
       this.activeRuns.set(runId, proc);
+
+      let agentStderr = "";
+      proc.stderr?.on("data", (chunk: Buffer) => { agentStderr += chunk.toString(); });
+
       proc.on("close", (code) => {
         this.activeRuns.delete(runId); this.pool.release();
         // Log exit code to DB for debugging timeout behavior
@@ -838,7 +831,7 @@ export class PatrolLoop {
           ).run(runId, workflow, subStepId, '[openclaw agent exit]', 'node', '.',
                  code ?? -1,
                  `exit_code=${code} signal=${proc.signalCode ?? 'none'}`,
-                 proc.signalCode ?? '', 0);
+                 agentStderr.slice(0, 2000) || (proc.signalCode ?? ''), 0);
         } catch { /* best-effort */ }
         if (code !== 0) db.updateTaskStatus(this.db, runId, "failed");
         console.log(`[orchestrator] run ${runId} completed (exit ${code})`);

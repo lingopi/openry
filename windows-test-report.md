@@ -1,154 +1,332 @@
-# OpenRY 测试报告
+# OpenRY Windows 适配测试报告
 
-- **测试日期**:2026-07-16
-- **测试平台**:Windows + PowerShell 7 (pwsh)
-- **被测版本**:`git clone https://github.com/lingopi/openry.git`(main)
-- **测试范围**:命令转发、Orchestrator 上下文、状态更新与 payload、错误处理、SQLite 审计、PowerShell 引号地狱、字符编码
+> **日期**：2026-08-06 ~ 2026-08-07  
+> **环境**：Windows 11 + Node.js v24.14.1 + Python 3.14 + PowerShell 7  
+> **目的**：让 OpenRY 在 Windows 上一键安装并正常运行 workflow
 
 ---
 
-## 1. 执行模型
+## 一、发现的全部问题及修复方案
 
-OpenRY 的命令执行是**双层解析**链路:
+### 问题 1：YAML 文件编码 → `charmap codec can't decode`
+
+**现象**：运行 workflow 时 `open()` 报 `'charmap' codec can't decode byte 0x8d`
+
+**根因**：`yaml_loader.py`、`validation.py`、`cli.py` 的 `open(path)` 未指定 `encoding="utf-8"`。Windows 默认 ANSI 代码页（`cp936`/`cp1252`）无法解码 UTF-8 文件。
+
+**修复**（已由上游合入）：所有 `open(path)` → `open(path, encoding="utf-8")`
+
+---
+
+### 问题 2：better-sqlite3 原生模块缺失 → Patrol 巡查循环无法启动
+
+**现象**：workflow 创建后永远停在 `queued` 状态
+
+**根因**：`better-sqlite3` 是 C++ native 模块，`npm install` 时需从 **GitHub Releases** 下载预编译 `.node` 二进制。国内网络 GitHub 不通 → 下载超时 → 二进制文件缺失 → `openDb()` 抛异常 → `createOrchestratorService().start()` 失败 → Patrol 巡查循环未启动。
+
+**错误日志**：
+```
+[orchestrator-plugin] start FAILED: Error: Could not locate the bindings file.
+Tried: ...\better-sqlite3\lib\binding\node-v137-win32-x64\better_sqlite3.node
+```
+
+**修复（安装脚本层面，不改源码）**：
+
+1. `npm install --ignore-scripts` — 跳过原生模块的 postinstall 下载
+2. 新增 `orchestrator-plugin/scripts/download-native.mjs` — 从镜像站下载 `.node`
+3. `package.json` 加 `"postinstall": "node scripts/download-native.mjs || true"`
+4. `install.ps1` / `install.sh` 同步更新
+
+**镜像站池**（按优先级）：
+```
+ghfast.top → ghproxy.com → mirror.ghproxy.com → github.moeyy.xyz → gh.con.sh
+```
+
+**涉及文件**：
+- `orchestrator-plugin/scripts/download-native.mjs` 🆕
+- `orchestrator-plugin/package.json` — 加 `postinstall`
+- `install.ps1` — `npm install --silent` → `npm install --ignore-scripts` + 手动调用下载
+- `install.sh` — 同上
+
+---
+
+### 问题 3：`spawn()` 无法执行 `.cmd` 文件 → exit_code=-4058
+
+**现象**：`commands_log` 中 `exit_code=-4058`, `duration_ms=0`
+
+**根因**：`patrol.ts` 中 `spawn('openclaw', [...])` 直接调用。Windows 上 `openclaw` 是 `openclaw.cmd`，Node.js `spawn()` 不带 `shell:true` 无法直接执行批处理文件。
+
+**错误日志**：
+```
+[orchestrator] dispatched run xxx (step=step_greet)
+[orchestrator] run xxx completed (exit -4058)
+```
+
+**修复方向**：创建跨平台 spawn 工具 `spawn-helper.ts`
 
 ```
-外层 PowerShell (openry -c '...')   ← 解析第 1 层引号
-        │  原样传给 openry 的 command 参数
-        ▼
-openry executor
-        │  subprocess.run([pwsh, -NoProfile, -NonInteractive, -Command, <string>])
-        ▼
-内层 pwsh -Command                  ← 再次解析第 2 层引号 / 变量 / 操作符
+⚠️ 关键决策：必须用 pwsh（PowerShell 7），严禁用 cmd.exe！
 ```
 
-理解引号与变量行为的关键:**外层与内层各解析一次**。相关代码见
-[openry/executor.py](openry/executor.py#L91-L98)。
+理由：
+- `pwsh` 单引号 `'...'` 是字面量字符串（和 Unix `sh` 行为一致）
+- `cmd.exe` 不认单引号，导致后续 JSON payload 被空格截断
+- `install.ps1` 已确保用户安装了 PowerShell 7
+
+**修复要点**：
+- Windows：`spawn('pwsh', ['-NoProfile', '-NonInteractive', '-Command', flatArgs], ...)`
+- Unix：`spawn(command, args, ...)` 保持不变
+- PATH 构建：`buildPath()` — Windows 用 `;` 分隔，Unix 用 `:`
+
+**涉及文件**：
+- `orchestrator-plugin/src/orchestrator/spawn-helper.ts` 🆕
+- `orchestrator-plugin/src/orchestrator/patrol.ts` — 所有 `spawn()` 改用 `spawnOpenclaw()` + `buildPath()`
 
 ---
 
-## 2. 功能测试
+### 问题 4：Agent 未注册 → `Unknown agent id "openry-worker"`
 
-### 2.1 基础命令转发
+**现象**：`cmd.exe /c openclaw agent --agent openry-worker` → `Unknown agent id`
 
-| 命令 | 输出 | 结果 |
-|------|------|------|
-| `openry -c 'echo "hello"'` | `{"exit_code": 0, "stdout": "hello\r\n", "stderr": "", "duration_ms": 569}` | ✅ |
+**根因**：`install.sh` 只打印提示让用户手动加 agent，`install.ps1` 完全没有 agent 注册逻辑。
 
-### 2.2 Orchestrator 上下文(环境变量)
+**修复**：安装脚本中新增：
+1. 创建 agent workspace 目录 + `AGENTS.md`
+2. `openclaw agents add openry-worker --workspace <path> --non-interactive`
 
-设置 `OPENRY_RUN_ID` / `OPENRY_WORKFLOW` / `OPENRY_STEP_ID` 后执行命令:
-
-| 命令 | 输出 | 结果 |
-|------|------|------|
-| `$env:OPENRY_RUN_ID="run-001"; ... ; openry -c 'echo "hello from orchestrator"'` | `{"exit_code": 0, "stdout": "hello from orchestrator\r\n", ...}` | ✅ 元数据正确写入审计库 |
-
-- 元数据(run_id / workflow / step_id)对 agent 输出**不可见**,仅写入 SQLite,符合"透明审计"设计。
-
-### 2.3 额外环境变量注入(`-e`)
-
-| 命令 | 输出 | 结果 |
-|------|------|------|
-| `openry -c 'echo "custom var = $env:MY_VAR"' -e MY_VAR=hello123` | `{"exit_code": 0, "stdout": "custom var = hello123\r\n", ...}` | ✅ |
-
-### 2.4 状态更新 + payload
-
-| 命令 | 输出 | 结果 |
-|------|------|------|
-| `openry --status completed --payload '{"msg_id":"123","artifact":"report.pdf"}'` | `{"status": "completed", "payload": {"msg_id": "123", "artifact": "report.pdf"}, "acknowledged": true}` | ✅ payload 原样回传并入库 |
+**涉及文件**：`install.ps1`、`install.sh`
 
 ---
 
-## 3. 错误处理与边界
+### 问题 5：Agent tools 未放行 → Agent 找不到 openry_run/openry_status
 
-| 场景 | 命令 | 输出 | 结果 |
-|------|------|------|------|
-| 无 RUN_ID 做 status | `openry --status completed`(未设 RUN_ID) | `{"error": "OPENRY_RUN_ID not set; --status requires an active run"}` | ✅ |
-| 非法 JSON payload | `--payload '{invalid json}'` | `{"error": "payload must be valid JSON"}` | ✅ |
-| 非对象 payload | `--payload '["not","an","object"]'` | `{"error": "payload must be a JSON object"}` | ✅ |
-| 命令非零退出码 | `openry -c 'exit 3'` | `{"exit_code": 3, ...}` | ✅ 退出码透传 |
+**现象**：AI agent 回复 > "我在当前可用的工具列表中没有找到 openry_status"
 
----
+**根因**：`openry-worker` agent 缺少 `tools` 配置，OpenClaw 默认不放行插件注册的自定义工具。
 
-## 4. SQLite 审计验证
+**修复**：在 `openclaw.json` 中为 `openry-worker` agent 写入：
+```json
+"tools": {
+    "profile": "minimal",
+    "alsoAllow": [
+        "openry_run",
+        "openry_status",
+        "openry_payload_query",
+        "openry_knowledge_query"
+    ]
+}
+```
 
-数据库位置:`.openry/openry.db`
-
-### 4.1 `commands_log`(节选)
-
-| id | run_id | workflow | step_id | command | shell | exit_code | timeout |
-|----|--------|----------|---------|---------|-------|-----------|---------|
-| 2 | (null) | (null) | (null) | `echo "hello"` | pwsh | 0 | 0 |
-| 3 | run-001 | demo-flow | step-1 | `echo "hello from orchestrator"` | pwsh | 0 | 0 |
-| 4 | run-001 | demo-flow | step-1 | `echo "custom var = $env:MY_VAR"` | pwsh | 0 | 0 |
-| 6 | run-002 | (null) | (null) | `exit 3` | pwsh | 3 | 0 |
-
-- ✅ 每次命令均落库;Orchestrator 上下文正确关联。
-
-### 4.2 `task_state`(状态机生命周期)
-
-| run_id | status | payload | created_at | updated_at |
-|--------|--------|---------|-----------|-----------|
-| run-001 | completed | `{"msg_id":"123","artifact":"report.pdf"}` | 07:22:00 | 07:22:41 |
-| run-002 | in_progress | `{}` | 07:22:52 | 07:22:52 |
-
-- ✅ `run-001`:`-c` 执行时创建为 `in_progress`,`--status completed` 后升级为 `completed`,**created_at 保留、updated_at 刷新**。
-- ✅ `run-002`:设置了 RUN_ID 后,`exit 3` 自动创建 `in_progress` 行。
+**涉及文件**：`install.ps1`、`install.sh`（agent 注册后自动写入）
 
 ---
 
-## 5. PowerShell 引号地狱
+### 问题 6：Shell 引号不兼容 → `payload must be valid JSON`
 
-| # | 场景 | 命令片段 | stdout 呈现 | 结果 |
-|---|------|----------|-------------|------|
-| 1 | 单引号裹双引号 | `'echo "hello world"'` | `hello world` | ✅ |
-| 2 | 字面量单引号(`''` 转义) | `'echo ''it''''s a test'''` | `it's a test` | ✅ |
-| 3 | 单双引号混合 | `'echo "she said ''hi''"'` | `she said 'hi'` | ✅ |
-| 4 | 输出 JSON 字面量 | `'echo ''{"name":"openry","ok":true}'''` | `{\"name\": \"openry\", \"ok\": true}` | ✅ 双引号被 JSON 转义为 `\"` |
-| 5 | 变量展开(双层陷阱) | `'echo "PID=$PID"'` | `PID=74960` | ⚠️ 外层单引号本应字面量,**内层 pwsh 仍求值** |
-| 6 | 阻止内层求值 | `'echo ''literal $PID not expanded'''` | `literal $PID not expanded` | ✅ 内层单引号才字面量 |
-| 7 | 内层双引号需反引号转义 | `` 'echo "quote: `"nested`""' `` | `quote: \"nested\"` | ✅ |
-| 8 | 语句分隔符 `;` | `'echo A; echo B'` | `A\r\nB` | ✅ 被内层 pwsh 执行 |
-| 9 | Unicode/中文/emoji | `'echo "中文 😀 café"'` | `?? ?? caf�` | ❌ **乱码(编码 bug)** |
-| 10 | stderr 含引号 | `'Write-Error "oops ''bad'' thing"'` | `...oops 'bad' thing...` | ✅ 引号保留(夹带 ANSI 颜色码 `\u001b[31;1m`) |
+**现象**：Agent 调用 `openry_status` 传 `{"message":"test"}` 时报错
 
-### 结论
+**根因**：`index.ts` 中 `openry_status` 工具用单引号包裹 JSON 传给 `execSync()`：
+```typescript
+execSync(`${OPENRY_CLI} --status ${status} --payload '${payloadJson}'`, ...)
+```
+Node.js 的 `execSync` 在 Windows 内部用 `cmd.exe /c` 执行。`cmd.exe` 不认单引号，JSON 中的空格被当作参数分隔符，Python CLI 收到被截断的字符串无法解析。
 
-- **引号地狱可正常呈现**,但使用者必须按"双层解析"心智模型编写命令。
-- 案例 5 是核心坑:外层单引号无法阻止**内层** pwsh 对 `$PID` 求值;要字面量必须让内层也用单引号(案例 6)。
-- OpenRY 用 `json.dumps` 序列化输出,命令结果中的双引号/反斜杠都会被安全转义,Orchestrator 始终拿到**合法 JSON**,不会被二次破坏。
+**修复方向**（依赖问题 3 的 pwsh 方案）：
+```typescript
+// 用 pwsh 包裹执行 — pwsh 单引号行为和 Unix sh 一致
+execSync(`pwsh -NoProfile -Command "openry --status ${status} --payload '${payloadJson}'"`, ...)
+```
 
----
+或者**环境变量方案**（更彻底）：
+```typescript
+// TypeScript — 通过环境变量传 JSON，完全绕过 shell
+execEnv.OPENRY_PAYLOAD = payloadJson;
+execSync(`openry --status ${status} --payload-stdin`, { env: execEnv });
+```
+```python
+# Python — 从环境变量读取
+if args.payload_stdin:
+    payload_str = os.environ.get("OPENRY_PAYLOAD", "{}")
+```
 
-## 6. 缺陷记录
-
-### BUG-1:非 ASCII 输出乱码(中等严重)
-
-- **现象**:`echo "中文 😀 café"` 输出为 `?? ?? caf�`(见案例 9)。
-- **影响**:任何含中文、emoji、重音字母的命令输出都会损坏,进而污染审计库与 Orchestrator payload。
-- **根因**:
-  1. [openry/executor.py](openry/executor.py#L91-L98) 用 `subprocess.run(..., capture_output=True)` 捕获**字节**,但子进程 pwsh 的 `[Console]::OutputEncoding` 在 Windows 默认是系统代码页(非 UTF-8),部分字符在输出阶段即被替换为 `?`;
-  2. [openry/utils.py](openry/utils.py#L14-L16) 的 `safe_decode` 用 `sys.getfilesystemencoding()` 解码,与 pwsh 实际输出编码不匹配,`é` 等字节进一步坏成 `�`。
-- **建议修复方向**:
-  - 调用 pwsh 时强制 UTF-8 输出,例如在 `-Command` 前置 `[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8;`;
-  - 将 `safe_decode` 固定为 `utf-8`(保留 `errors="surrogateescape"` 或改 `replace`)。
-
-### 观察项:stderr 夹带 ANSI 颜色码
-
-- `Write-Error` 的 stderr 输出包含 ANSI 转义序列(`\u001b[31;1m`,见案例 10)。
-- 对机器消费(Orchestrator)可能是噪声。可考虑调用时加 `-NoLogo` 或设置 `$PSStyle.OutputRendering = 'PlainText'`(pwsh 7.2+)。
+**涉及文件**：`orchestrator-plugin/src/index.ts`（`openry_status` 和 `openry_run` 工具）
 
 ---
 
-## 7. 总体结论
+### 问题 7：stdout 编码 → `charmap codec can't encode character '\u2705'`
 
-| 维度 | 评价 |
-|------|------|
-| 命令转发 | ✅ 稳定,退出码/stdout/stderr 透传正确 |
-| Orchestrator 上下文 | ✅ 环境变量注入与元数据关联正确 |
-| 状态机 + payload | ✅ `in_progress → completed` 生命周期与 payload 存取正确 |
-| 错误处理 | ✅ 边界与非法输入均有明确报错 |
-| SQLite 审计 | ✅ 命令与状态完整落库,对 agent 透明 |
-| 引号地狱 | ✅ 可呈现(需双层心智模型) |
-| 字符编码 | ❌ 非 ASCII 输出乱码(BUG-1,待修复) |
+**现象**：Agent 返回含 emoji 的结果后，`openry_status` 报 `UnicodeEncodeError: 'charmap' codec can't encode character '\u2705'`
 
-**核心闭环(命令转发 → 上下文注入 → 状态更新 + payload → 透明审计)全部验证通过。** 唯一需要修复的是 Windows 下非 ASCII 输出的 UTF-8 编码问题(BUG-1)。
+**根因**：`cli.py` 中 `print(json.dumps(result, ensure_ascii=False))` 输出到 stdout。Windows 默认 stdout 编码为 `cp1252`，无法编码 emoji 等 UTF-8 字符。
+
+**错误日志**：
+```
+File "C:\Python314\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2705' in position 265
+```
+
+**修复**：在 `main()` 入口添加 stdout 重配置（仅 Windows）：
+```python
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+```
+
+**涉及文件**：`openry/cli.py` — `main()` 函数
+
+---
+
+### 问题 8：命令输出编码 → 中文变问号
+
+**现象**：Agent 执行 `date` 等命令后，payload 中的中文字符变成 `?`，如 `2026?8?7?`
+
+**根因**：`utils.py` 的 `safe_decode()` 使用 `sys.getfilesystemencoding()`（Windows = `cp1252`）解码子进程输出。pwsh 输出的是 UTF-8，`cp1252` 无法解码中文 → surrogate 字符 → `json.dumps` 替换为 `?`。
+
+**修复**：UTF-8 优先尝试，失败时降级到系统编码（添加式，不影响 Unix）：
+```python
+def safe_decode(data: bytes) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(sys.getfilesystemencoding(), errors="surrogateescape")
+```
+
+**涉及文件**：`openry/utils.py` — `safe_decode()`
+
+**⚠️ 补充修复**：仅 `safe_decode` 不够。pwsh 在 stdout 被管道重定向时默认用 ASCII 编码。需用 `[Console]::OutputEncoding`（非 `$OutputEncoding`）强制 UTF-8：
+```python
+f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}"
+```
+
+**涉及文件**：`openry/executor.py` — `run_command()` 中 pwsh 调用
+
+---
+
+### 问题 9：Transcript 加载失败 → `Failed to load transcript`
+
+**现象**：前端 Session Transcript 区域显示 "Failed to load transcript"
+
+**根因**：`api_server.py` 中 `_find_session_id()` 和 `_parse_transcript()` 的 `Path.read_text()` 未指定 `encoding="utf-8"`。Windows 默认 cp1252 无法解码含 emoji/CJK 的 JSONL 对话记录。
+
+**修复**：`read_text()` → `read_text(encoding="utf-8")`
+
+**涉及文件**：`openry/server/api_server.py` — `_find_session_id()`, `_parse_transcript()`
+
+---
+
+### 问题 10：`sharp` 原生模块缺失 → Concepts 向量化失败
+
+**现象**：Concepts 列表为空，日志中反复报错：
+```
+[orchestrator-plugin] agent concept normalization failed for xxx:
+Error: Something went wrong installing the "sharp" module
+Cannot find module '../build/Release/sharp-win32-x64.node'
+```
+
+**根因**：`@xenova/transformers`（BGE-M3 向量化）依赖 `sharp`（图片处理 native 模块）。`npm install --ignore-scripts` 跳过了 `better-sqlite3` 也跳过了 `sharp`，导致 `sharp` 的预编译二进制缺失。`scanAndNormalizeAgentConcepts()` 找到 concepts 后调用 `embed()` → `sharp` 加载失败 → 静默吞错。
+
+**修复**：`download-native.mjs` 扩展为同时处理 `better-sqlite3` 和 `sharp` 两个 native 模块。sharp 使用 N-API v7 命名规则：`sharp-v{ver}-napi-v7-{platform}-{arch}.tar.gz`。
+
+**涉及文件**：`orchestrator-plugin/scripts/download-native.mjs`
+
+---
+
+### 问题 11：`member_count` 膨胀 → Concepts 聚类被重复计数
+
+**现象**：只运行 1 个 hello_world workflow（2 个 agent step），clusters 表的 `member_count` 却是 16 和 8（预期为 1 和 1）。
+
+**根因**：`patrol.ts` 的 `patrol()` 循环（每 5 秒触发）中，`this.scanAndNormalizeAgentConcepts()` **缺少 `await`**：
+
+```typescript
+// patrol() 是同步方法，不 await async 函数
+this.scanAndNormalizeAgentConcepts(); // ⚠️ fire-and-forget
+```
+
+`scanAndNormalizeAgentConcepts` 是 `async`，内部调用 `await normalizeConcepts()` → `await embed()`（BGE-M3 ONNX 推理）。Windows 上 ONNX 只用 CPU EP，模型首次加载 ~20-80 秒，远超 5 秒 patrol 间隔。
+
+**时序**：重叠的 patrol 周期并发查询同一行 task_state（`_core_id` 还没写完），各自调用 `normalizeConcepts()`，每调一次 `member_count += 1`。
+
+**为何 macOS 不出现**：Apple Silicon 有 CoreML EP（ANE/GPU 硬件加速），模型加载 ~2-5 秒 < patrol 间隔，不会重叠。
+
+**修复**：给 `scanAndNormalizeAgentConcepts` 加轻量并发锁（`_conceptNormalizing` 布尔标志），已在途调用时直接跳过。不影响 patrol 整体同步架构，macOS/Linux 零影响。
+
+**涉及文件**：`orchestrator-plugin/src/orchestrator/patrol.ts` — `scanAndNormalizeAgentConcepts()` + `_conceptNormalizing` 字段
+
+**补充**：`install.ps1`/`uninstall.ps1` 同步修复（见问题 6 附）：
+- `uninstall.ps1`：Step 6 删除数据前先 `Stop-Process python*` 杀 DB 锁进程，改为逐个删 DB 文件再删目录
+- `install.ps1`：Step 6 初始化前清除旧 `openry.db*`，确保每次重装都是干净库
+
+---
+
+## 二、问题关系图
+
+```mermaid
+flowchart TD
+    P1["问题1: YAML 编码<br/>open(encoding=utf-8)"] --> D1[✅]
+    P2["问题2: better-sqlite3<br/>镜像下载 + postinstall"] --> D2[✅]
+    P3["问题3: spawn .cmd<br/>pwsh 代替 cmd.exe"] --> D3[✅]
+    P4["问题4: Agent 未注册<br/>安装脚本自动注册"] --> D4[✅]
+    P5["问题5: Tools 未放行<br/>openclaw.json 配置"] --> D5[✅]
+    P6["问题6: 引号不兼容<br/>spawnSync pwsh"] --> D6[✅]
+    P7["问题7: stdout 编码<br/>reconfigure utf-8"] --> D7[✅]
+    P8["问题8: 中文变问号<br/>safe_decode UTF-8优先"] --> D8[✅]
+    P9["问题9: Transcript<br/>read_text utf-8"] --> D9[✅]
+    P10["问题10: sharp模块<br/>download-native扩展"] --> D10[✅]
+    P11["问题11: member_count膨胀<br/>_conceptNormalizing锁"] --> D11[✅]
+    P3 --> P6
+    P2 --> P10
+```
+
+---
+
+## 三、改动文件总览
+
+| 文件 | 操作 | 关联问题 |
+|------|------|----------|
+| `openry/orchestrator/yaml_loader.py` | 🔧 `open(encoding="utf-8")` | 问题1 |
+| `openry/orchestrator/validation.py` | 🔧 `open(encoding="utf-8")` | 问题1 |
+| `openry/cli.py` | 🔧 `open(encoding="utf-8")` | 问题1 |
+| `openry/cli.py` | 🔧 `sys.stdout.reconfigure(encoding="utf-8")` | 问题7 |
+| `openry/server/api_server.py` | 🔧 `read_text(encoding="utf-8")` | 问题9 |
+| `openry/executor.py` | 🔧 pwsh 输出强制 UTF-8 | 问题8 |
+| `openry/utils.py` | 🔧 `safe_decode()` UTF-8 优先 | 问题8 |
+| `orchestrator-plugin/scripts/download-native.mjs` | 🆕 镜像下载 | 问题2 |
+| `orchestrator-plugin/package.json` | 🔧 `postinstall` | 问题2 |
+| `orchestrator-plugin/src/orchestrator/spawn-helper.ts` | 🆕 跨平台 spawn（**pwsh**） | 问题3 |
+| `orchestrator-plugin/src/orchestrator/patrol.ts` | 🔧 spawn + PATH | 问题3 |
+| `orchestrator-plugin/src/orchestrator/patrol.ts` | 🔧 `_conceptNormalizing` 并发锁 | 问题11 |
+| `orchestrator-plugin/src/index.ts` | 🔧 shell 引号兼容 | 问题6 |
+| `install.ps1` | 🔧 安装流程 + DB清理 | 问题2,4,5 |
+| `install.sh` | 🔧 安装流程 | 问题2,4,5 |
+| `uninstall.ps1` | 🆕 卸载脚本 + 杀进程/DB锁修复 | — |
+
+---
+
+## 四、给后续修复者的提示
+
+```
+在 Windows 上适配 OpenRY 时必须遵守以下原则：
+
+1. 🐚 Shell 选择
+   Windows 上所有子进程 spawn/exec 必须使用 pwsh（PowerShell 7），
+   严禁使用 cmd.exe。pwsh 的单引号行为和 Unix sh 一致。
+
+2. 🛣 PATH 分隔符
+   Windows 用 ;  Unix 用 :  buildPath() 工具函数按平台选择。
+
+3. 📝 文件编码
+   所有 open() / readFileSync() 必须显式指定 encoding="utf-8"。
+   Python 入口 main() 中 sys.stdout.reconfigure(encoding="utf-8")。
+
+4. 📦 原生模块
+   better-sqlite3 通过 download-native.mjs 从镜像站下载，
+   npm install 必须用 --ignore-scripts。
+
+5. 🤖 Agent 配置
+   安装脚本必须自动注册 openry-worker agent 并配置 tools。
+
+6. 🧩 修复方式
+   所有修改必须是"添加/扩展/新增"，不动 macOS/Linux 已有逻辑。
+   用 process.platform === 'win32' 做平台判断，
+   Windows 路径走新分支，Unix 路径保持不变（直接 spawn shebang）。
+```
