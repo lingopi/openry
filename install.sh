@@ -163,6 +163,10 @@ mkdir -p "$OPENRY_HOME/workflows"
 mkdir -p "$OPENRY_HOME/compositions"
 mkdir -p "$OPENRY_HOME/prompts"
 mkdir -p "$OPENRY_HOME/prompt_blocks"
+
+# Clean stale DB from previous install (fresh start)
+rm -f "$OPENRY_HOME/openry.db" "$OPENRY_HOME/openry.db-wal" "$OPENRY_HOME/openry.db-shm" 2>/dev/null || true
+
 echo -e "  ${GREEN}✓${NC} Initialized ${CYAN}${OPENRY_HOME}${NC} (workflows/ + compositions/ + prompts/ + prompt_blocks/)"
 echo ""
 
@@ -226,23 +230,62 @@ if [ -d "$PLUGIN_DIR" ]; then
 
         cd "$PLUGIN_DIR"
 
-        # --ignore-scripts: skip better-sqlite3 native module download
-        # (which tries GitHub and hangs on poor connectivity)
-        npm install --ignore-scripts 2>/dev/null || {
-            echo -e "  ${YELLOW}⚠ npm install failed, skipping plugin${NC}"
-            PLUGIN_OK=false
-        }
+        # ── Fast path: use pre-built bundle if available ──
+        BUNDLE_FILE="orchestrator-plugin-bundle.tar.gz"
+        BUNDLE_LOCAL="${SCRIPT_DIR}/deps/macos/${BUNDLE_FILE}"
+        BUNDLE_VERSION="plugin-bundle-v1.0"
+        USE_BUNDLE=false
 
-        if $PLUGIN_OK; then
-            # Download better-sqlite3 prebuilt binary from mirrors
-            node scripts/download-native.mjs 2>/dev/null || true
+        if [ -f "$BUNDLE_LOCAL" ]; then
+            echo -e "    Using local plugin bundle: ${BUNDLE_LOCAL}"
+            USE_BUNDLE=true
+        else
+            # Try download from GitHub Release mirror
+            BUNDLE_URL="https://ghfast.top/https://github.com/lingopi/openry/releases/download/${BUNDLE_VERSION}/${BUNDLE_FILE}"
+            BUNDLE_TMP="/tmp/${BUNDLE_FILE}"
+            if curl -fsSL --connect-timeout 30 --max-time 300 -o "$BUNDLE_TMP" "$BUNDLE_URL" 2>/dev/null && [ -f "$BUNDLE_TMP" ]; then
+                USE_BUNDLE=true
+                BUNDLE_LOCAL="$BUNDLE_TMP"
+                # Save to deps/ for future reinstalls
+                mkdir -p "${SCRIPT_DIR}/deps/macos"
+                cp "$BUNDLE_TMP" "${SCRIPT_DIR}/deps/macos/${BUNDLE_FILE}" 2>/dev/null || true
+            fi
         fi
 
-        if $PLUGIN_OK; then
-            npm run build 2>/dev/null || {
-                echo -e "  ${YELLOW}⚠ build failed, skipping plugin${NC}"
+        if [ "$USE_BUNDLE" = true ]; then
+            echo -e "    Extracting plugin bundle (standalone, no network needed)..."
+            rm -rf "$PLUGIN_DIR/node_modules" "$PLUGIN_DIR/dist" 2>/dev/null || true
+            if tar -xzf "$BUNDLE_LOCAL" -C "$PLUGIN_DIR" 2>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} Plugin bundle extracted"
+            else
+                echo -e "  ${YELLOW}⚠ Bundle extraction failed, falling back to npm...${NC}"
+                USE_BUNDLE=false
+            fi
+            # Clean up temp download
+            if [ "$BUNDLE_LOCAL" = "/tmp/${BUNDLE_FILE}" ]; then
+                rm -f "$BUNDLE_LOCAL" 2>/dev/null
+            fi
+        fi
+
+        if [ "$USE_BUNDLE" != true ]; then
+            # --ignore-scripts: skip better-sqlite3 native module download
+            # (which tries GitHub and hangs on poor connectivity)
+            npm install --ignore-scripts 2>/dev/null || {
+                echo -e "  ${YELLOW}⚠ npm install failed, skipping plugin${NC}"
                 PLUGIN_OK=false
             }
+
+            if $PLUGIN_OK; then
+                # Download better-sqlite3 prebuilt binary from mirrors
+                node scripts/download-native.mjs 2>/dev/null || true
+            fi
+
+            if $PLUGIN_OK; then
+                npm run build 2>/dev/null || {
+                    echo -e "  ${YELLOW}⚠ build failed, skipping plugin${NC}"
+                    PLUGIN_OK=false
+                }
+            fi
         fi
 
         if $PLUGIN_OK; then
@@ -293,9 +336,9 @@ AGENTPROMPT
                 # Configure agent tools to allow OpenRY plugin tools
                 OCL_CONFIG="$HOME/.openclaw/openclaw.json"
                 if [ -f "$OCL_CONFIG" ]; then
-                    $PYTHON_CMD -c "
+                    $PYTHON -c "
 import json, sys
-with open('$OCL_CONFIG', 'r') as f:
+with open('$OCL_CONFIG', 'r', encoding='utf-8') as f:
     c = json.load(f)
 for a in c.get('agents', {}).get('list', []):
     if a.get('id') == 'openry-worker':
@@ -304,27 +347,38 @@ for a in c.get('agents', {}).get('list', []):
             'alsoAllow': ['openry_run', 'openry_status', 'openry_payload_query', 'openry_knowledge_query']
         }
         break
-with open('$OCL_CONFIG', 'w') as f:
-    json.dump(c, f, indent=2)
+with open('$OCL_CONFIG', 'w', encoding='utf-8') as f:
+    json.dump(c, f, indent=2, ensure_ascii=False)
 " 2>/dev/null && echo -e "  ${GREEN}✓${NC} Agent tools configured" || echo -e "  ${YELLOW}⚠${NC} Tools config failed (non-fatal)"
                 fi
             else
                 echo -e "  ${YELLOW}⚠${NC} Agent registration failed (may already exist)"
             fi
 
-            # ── Install BGE-M3 model from GitHub Release ──
+            # ── Install BGE-M3 model (local file or GitHub Release) ──
             echo -e "  Installing BGE-M3 embedding model (one-time, ~400MB)..."
             BGE_VER="bge-m3-v1.0"
             BGE_FILE="bge-m3-offline.tar.gz"
-            BGE_URL="https://ghfast.top/https://github.com/lingopi/openry/releases/download/${BGE_VER}/${BGE_FILE}"
+            BGE_LOCAL="${SCRIPT_DIR}/deps/common/${BGE_FILE}"
             BGE_TMP="/tmp/${BGE_FILE}"
             BGE_DIR="/tmp/bge-m3-bundle"
-            if curl -fsSL --connect-timeout 30 -o "$BGE_TMP" "$BGE_URL"; then
+            BGE_OK=false
+
+            if [ -f "$BGE_LOCAL" ]; then
+                echo -e "    Using local file: ${BGE_LOCAL}"
+                cp "$BGE_LOCAL" "$BGE_TMP" && BGE_OK=true
+            else
+                BGE_URL="https://ghfast.top/https://github.com/lingopi/openry/releases/download/${BGE_VER}/${BGE_FILE}"
+                echo -e "    Downloading from: ${BGE_URL}"
+                curl -fsSL --connect-timeout 30 -o "$BGE_TMP" "$BGE_URL" && BGE_OK=true
+            fi
+
+            if [ "$BGE_OK" = true ]; then
                 rm -rf "$BGE_DIR" 2>/dev/null
                 mkdir -p "$BGE_DIR"
                 tar -xzf "$BGE_TMP" -C "$BGE_DIR"
-                if [ -f "$BGE_DIR/install-bge-m3.sh" ]; then
-                    bash "$BGE_DIR/install-bge-m3.sh" "$PLUGIN_DIR" && \
+                if [ -f "$BGE_DIR/bge-m3-bundle/install-bge-m3.sh" ]; then
+                    bash "$BGE_DIR/bge-m3-bundle/install-bge-m3.sh" "$PLUGIN_DIR" && \
                         echo -e "  ${GREEN}✓${NC} BGE-M3 model installed" || \
                         echo -e "  ${YELLOW}⚠${NC} BGE-M3 install script failed"
                 fi
@@ -344,16 +398,22 @@ fi
 
 # ── 11. Done ──────────────────────────────────────────────────────────────
 
-echo -e "${GREEN}${BOLD}╔══════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║     OpenRY installation complete!    ║${NC}"
-echo -e "${GREEN}${BOLD}╚══════════════════════════════════════╝${NC}"
+echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}${BOLD}║     OpenRY installation complete!                ║${NC}"
+echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
-echo "  Quick test:"
+echo -e "  ${CYAN}Next steps:${NC}"
+echo -e "    1. ${BOLD}openclaw gateway restart${NC}"
+echo -e "    2. ${BOLD}openry serve${NC}"
+echo "  Then open http://127.0.0.1:\${OPENRY_PORT:-8080}"
+echo ""
+echo -e "  ${CYAN}Quick test:${NC}"
 echo "    openry -c 'echo hello'"
 echo ""
-echo "  Workflows:    ${OPENRY_HOME}/workflows/"
-echo "  Compositions: ${OPENRY_HOME}/compositions/"
-echo "  Prompts:      ${OPENRY_HOME}/prompts/"
-echo "  Prompt Blocks:${OPENRY_HOME}/prompt_blocks/"
-echo "  Database:     ${OPENRY_HOME}/openry.db  (auto-created on first use)"
+echo -e "  ${CYAN}Directories:${NC}"
+echo "    Workflows:    ${OPENRY_HOME}/workflows/"
+echo "    Compositions: ${OPENRY_HOME}/compositions/"
+echo "    Prompts:      ${OPENRY_HOME}/prompts/"
+echo "    Prompt Blocks:${OPENRY_HOME}/prompt_blocks/"
+echo "    Database:     ${OPENRY_HOME}/openry.db  (auto-created on first use)"
 echo ""

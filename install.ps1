@@ -378,7 +378,7 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
 
         # ── Fast path: use pre-built bundle if available ──
         $bundleFile = "orchestrator-plugin-bundle.tar.gz"
-        $bundleLocal = Join-Path $ScriptDir $bundleFile
+        $bundleLocal = Join-Path $ScriptDir "deps\windows\$bundleFile"
         $bundleVersion = "plugin-bundle-v1.0"
         $useBundle = $false
 
@@ -398,10 +398,12 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
                 }
             } catch { }
 
-            # Try installing to project dir so it's available for future reinstalls
+            # Save to deps/windows/ for future reinstalls
             if ($useBundle) {
                 try {
-                    Copy-Item $bundleTmp (Join-Path $ScriptDir $bundleFile) -Force -ErrorAction SilentlyContinue
+                    $depsDir = Join-Path $ScriptDir "deps\windows"
+                    New-Item -ItemType Directory -Force -Path $depsDir | Out-Null
+                    Copy-Item $bundleTmp (Join-Path $depsDir $bundleFile) -Force -ErrorAction SilentlyContinue
                 } catch { }
             }
         }
@@ -524,7 +526,7 @@ with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f
                 Write-Host "  Installing BGE-M3 embedding model (one-time, ~400MB)..."
                 $bgeVersion = "bge-m3-v1.0"
                 $bgeFile = "bge-m3-offline.tar.gz"
-                $bgeLocal = "$ScriptDir\$bgeFile"
+                $bgeLocal = "$ScriptDir\deps\common\$bgeFile"
                 $bgeTmp = "$env:TEMP\$bgeFile"
                 $bgeExtract = "$env:TEMP\bge-m3-extract"
                 $hfCache = "$env:USERPROFILE\.cache\huggingface\hub"

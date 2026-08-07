@@ -9,10 +9,19 @@ venv/
 .openry/
 *.db
 design/
-docs/
+docs/day*.md
+docs/knowql-agent-prompt.md
+docs/phase2-orchestrator-plugin-audit.md
+docs/pitfalls.md
+docs/state-machine-analysis.md
+docs/compositions-and-workflows-guide.md
 recode.md
 session执行过程.md
 openclaw-latest/
 .DS_Store
+# deps/ large files are now managed by Git LFS
+
+# Release assets — published to GitHub Releases, not in git
 bge-m3-offline.tar.gz
 orchestrator-plugin-bundle.tar.gz
+deps/
