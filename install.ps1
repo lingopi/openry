@@ -367,7 +367,9 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
 
         Push-Location $pluginDir
         try {
-            npm install --silent 2>&1 | Out-Null
+            # --ignore-scripts: skip better-sqlite3 native module download
+            # (which tries GitHub and hangs on poor connectivity)
+            npm install --ignore-scripts 2>&1 | Out-Null
         } catch {
             Write-Warn "npm install failed, skipping plugin"
             $pluginOk = $false
@@ -375,7 +377,16 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
 
         if ($pluginOk) {
             try {
-                npm run build --silent 2>&1 | Out-Null
+                # Download better-sqlite3 prebuilt binary from mirrors
+                node scripts/download-native.mjs 2>&1 | Out-Null
+            } catch {
+                Write-Warn "Native module download failed (non-fatal, trying build...)"
+            }
+        }
+
+        if ($pluginOk) {
+            try {
+                npm run build 2>&1 | Out-Null
             } catch {
                 Write-Warn "build failed, skipping plugin"
                 $pluginOk = $false
@@ -386,6 +397,101 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
             try {
                 openclaw plugins install . --link 2>&1 | Out-Null
                 Write-OK "Plugin installed"
+
+                # ── Create agent workspace + register openry-worker agent ──
+                $agentWs = Join-Path $OpenryHome "agent-workspace"
+                New-Item -ItemType Directory -Force -Path $agentWs | Out-Null
+
+                # Write AGENTS.md for the worker agent
+                @"
+# OpenRY Worker Agent
+
+You are an AI agent executing sub-steps of an OpenRY workflow.
+You have exactly TWO tools available:
+
+## Tools
+
+### openry_run
+Execute shell commands. Call this for ALL shell operations.
+
+### openry_status
+Declare the sub-step is complete. Call this ONLY when the task is fully done.
+
+## Rules
+
+1. Read the task description carefully — it tells you what to do
+2. Use `openry_run` for every shell command you need to run
+3. When the ENTIRE task is complete, call `openry_status` ONCE:
+   - `status: "completed"` — task succeeded, include all required data in `payload`
+   - `status: "failed"` — task cannot be completed
+4. Do NOT use `openry_run` to call the `openry` CLI directly — that's what `openry_status` tool is for
+5. Do NOT ask for confirmation — just execute
+6. Keep responses brief
+"@ | Out-File -FilePath (Join-Path $agentWs "AGENTS.md") -Encoding UTF8
+
+                # Register the agent in OpenClaw (idempotent — skips if exists)
+                try {
+                    openclaw agents add openry-worker --workspace $agentWs --non-interactive --json 2>&1 | Out-Null
+                    Write-OK "Agent 'openry-worker' registered"
+
+                    # Configure agent tools to allow OpenRY plugin tools
+                    try {
+                        $pyConfigScript = @"
+import json
+with open(r'$env:USERPROFILE\.openclaw\openclaw.json','r',encoding='utf-8') as f:
+    c = json.load(f)
+for a in c.get('agents',{}).get('list',[]):
+    if a.get('id') == 'openry-worker':
+        a['tools'] = {
+            'profile': 'minimal',
+            'alsoAllow': ['openry_run','openry_status','openry_payload_query','openry_knowledge_query']
+        }
+        break
+with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f:
+    json.dump(c, f, indent=2, ensure_ascii=False)
+"@
+                        & $pythonCmd -c $pyConfigScript 2>&1 | Out-Null
+                        Write-OK "Agent tools configured (openry_run, openry_status, ...)"
+                    } catch {
+                        Write-Warn "Tools config failed (non-fatal)"
+                    }
+                } catch {
+                    Write-Warn "Agent registration failed (may already exist)"
+                }
+
+                # ── Install BGE-M3 model from GitHub Release ──
+                Write-Host "  Installing BGE-M3 embedding model (one-time, ~400MB)..."
+                $bgeVersion = "bge-m3-v1.0"
+                $bgeFile = "bge-m3-offline.tar.gz"
+                $bgeUrl = "https://ghfast.top/https://github.com/lingopi/openry/releases/download/$bgeVersion/$bgeFile"
+                $bgeTmp = "$env:TEMP\$bgeFile"
+                $bgeExtract = "$env:TEMP\bge-m3-extract"
+                $hfCache = "$env:USERPROFILE\.cache\huggingface\hub"
+                try {
+                    # Use curl (reliable for large files) instead of Invoke-WebRequest
+                    curl -L -o $bgeTmp $bgeUrl --connect-timeout 30 --max-time 600 2>&1 | Out-Null
+                    if ($LASTEXITCODE -ne 0) { throw "curl exit code $LASTEXITCODE" }
+                    Remove-Item -Recurse -Force $bgeExtract -ErrorAction SilentlyContinue
+                    New-Item -ItemType Directory -Force $bgeExtract | Out-Null
+                    tar -xzf $bgeTmp -C $bgeExtract
+                    # Extract the inner model tar.gz to HF cache
+                    $modelTar = Get-ChildItem -Path $bgeExtract -Recurse -Filter "bge-m3-model.tar.gz" | Select-Object -First 1
+                    if ($modelTar) {
+                        New-Item -ItemType Directory -Force $hfCache | Out-Null
+                        tar -xzf $modelTar.FullName -C $hfCache
+                        Write-OK "BGE-M3 model installed"
+                    } else {
+                        # Flat structure: extract directly
+                        New-Item -ItemType Directory -Force $hfCache | Out-Null
+                        tar -xzf $bgeTmp -C $hfCache --strip-components=1 2>$null
+                        Write-OK "BGE-M3 model installed"
+                    }
+                } catch {
+                    Write-Warn "BGE-M3 download failed (will download on first use)"
+                } finally {
+                    Remove-Item $bgeTmp -Force -ErrorAction SilentlyContinue
+                    Remove-Item -Recurse -Force $bgeExtract -ErrorAction SilentlyContinue
+                }
             } catch {
                 Write-Warn "openclaw plugins install failed"
                 Write-Host "    Try: cd $pluginDir; openclaw plugins install . --link"

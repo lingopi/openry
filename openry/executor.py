@@ -88,8 +88,11 @@ def run_command(
     try:
         if shell in ("pwsh", "powershell"):
             # PowerShell: use list-based invocation
+            # [Console]::OutputEncoding → UTF-8: pwsh uses ASCII when
+            # stdout is piped, which replaces non-ASCII chars with "?"
             proc = subprocess.run(
-                [shell, "-NoProfile", "-NonInteractive", "-Command", command],
+                [shell, "-NoProfile", "-NonInteractive", "-Command",
+                 f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}"],
                 cwd=cwd,
                 timeout=timeout,
                 capture_output=True,

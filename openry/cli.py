@@ -850,6 +850,10 @@ def main() -> None:
         openry --status completed      # Update task status (backward compatible)
         openry serve [--port PORT]     # Start the dashboard API server
     """
+    # Fix stdout encoding on Windows (defaults to cp1252, can't encode emoji)
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding="utf-8")
+
     # Route 'serve' subcommand early to avoid breaking backward compat
     if len(sys.argv) > 1 and sys.argv[1] == "serve":
         serve_parser = argparse.ArgumentParser(prog="openry serve", description="Start the dashboard API server")

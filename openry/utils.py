@@ -12,8 +12,15 @@ def utc_now_iso() -> str:
 
 
 def safe_decode(data: bytes) -> str:
-    """Decode bytes to string, using surrogateescape for undecodable bytes."""
-    return data.decode(sys.getfilesystemencoding(), errors="surrogateescape")
+    """Decode bytes to string safely.
+
+    Tries UTF-8 first (handles emoji, CJK, and modern CLI output),
+    falls back to system encoding with surrogateescape for legacy tools.
+    """
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(sys.getfilesystemencoding(), errors="surrogateescape")
 
 
 def truncate_output(text: str, max_chars: int = 102400) -> str:

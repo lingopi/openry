@@ -226,13 +226,20 @@ if [ -d "$PLUGIN_DIR" ]; then
 
         cd "$PLUGIN_DIR"
 
-        npm install --silent 2>/dev/null || {
+        # --ignore-scripts: skip better-sqlite3 native module download
+        # (which tries GitHub and hangs on poor connectivity)
+        npm install --ignore-scripts 2>/dev/null || {
             echo -e "  ${YELLOW}⚠ npm install failed, skipping plugin${NC}"
             PLUGIN_OK=false
         }
 
         if $PLUGIN_OK; then
-            npm run build --silent 2>/dev/null || {
+            # Download better-sqlite3 prebuilt binary from mirrors
+            node scripts/download-native.mjs 2>/dev/null || true
+        fi
+
+        if $PLUGIN_OK; then
+            npm run build 2>/dev/null || {
                 echo -e "  ${YELLOW}⚠ build failed, skipping plugin${NC}"
                 PLUGIN_OK=false
             }
@@ -278,19 +285,56 @@ Declare the sub-step is complete. Call this ONLY when the task is fully done.
 AGENTPROMPT
 
             echo -e "  ${GREEN}✓${NC} Plugin installed + workspace created"
+
+            # Register the agent in OpenClaw (idempotent — skips if exists)
+            if openclaw agents add openry-worker --workspace "$AGENT_WS" --non-interactive --json >/dev/null 2>&1; then
+                echo -e "  ${GREEN}✓${NC} Agent 'openry-worker' registered"
+
+                # Configure agent tools to allow OpenRY plugin tools
+                OCL_CONFIG="$HOME/.openclaw/openclaw.json"
+                if [ -f "$OCL_CONFIG" ]; then
+                    $PYTHON_CMD -c "
+import json, sys
+with open('$OCL_CONFIG', 'r') as f:
+    c = json.load(f)
+for a in c.get('agents', {}).get('list', []):
+    if a.get('id') == 'openry-worker':
+        a['tools'] = {
+            'profile': 'minimal',
+            'alsoAllow': ['openry_run', 'openry_status', 'openry_payload_query', 'openry_knowledge_query']
+        }
+        break
+with open('$OCL_CONFIG', 'w') as f:
+    json.dump(c, f, indent=2)
+" 2>/dev/null && echo -e "  ${GREEN}✓${NC} Agent tools configured" || echo -e "  ${YELLOW}⚠${NC} Tools config failed (non-fatal)"
+                fi
+            else
+                echo -e "  ${YELLOW}⚠${NC} Agent registration failed (may already exist)"
+            fi
+
+            # ── Install BGE-M3 model from GitHub Release ──
+            echo -e "  Installing BGE-M3 embedding model (one-time, ~400MB)..."
+            BGE_VER="bge-m3-v1.0"
+            BGE_FILE="bge-m3-offline.tar.gz"
+            BGE_URL="https://ghfast.top/https://github.com/lingopi/openry/releases/download/${BGE_VER}/${BGE_FILE}"
+            BGE_TMP="/tmp/${BGE_FILE}"
+            BGE_DIR="/tmp/bge-m3-bundle"
+            if curl -fsSL --connect-timeout 30 -o "$BGE_TMP" "$BGE_URL"; then
+                rm -rf "$BGE_DIR" 2>/dev/null
+                mkdir -p "$BGE_DIR"
+                tar -xzf "$BGE_TMP" -C "$BGE_DIR"
+                if [ -f "$BGE_DIR/install-bge-m3.sh" ]; then
+                    bash "$BGE_DIR/install-bge-m3.sh" "$PLUGIN_DIR" && \
+                        echo -e "  ${GREEN}✓${NC} BGE-M3 model installed" || \
+                        echo -e "  ${YELLOW}⚠${NC} BGE-M3 install script failed"
+                fi
+                rm -f "$BGE_TMP"
+                rm -rf "$BGE_DIR"
+            else
+                echo -e "  ${YELLOW}⚠${NC} BGE-M3 download failed (will download on first use)"
+            fi
             echo ""
-            echo -e "  ${YELLOW}${BOLD}⚠ Add this to ~/.openclaw/openclaw.json:${NC}"
-            echo ""
-            echo '  "agents": {'
-            echo '    "list": [{'
-            echo '      "id": "openry-worker",'
-            echo '      "name": "OpenRY Worker",'
-            echo '      "tools": { "profile": "minimal", "alsoAllow": ["openry_run", "openry_status"] },'
-            echo "      \"workspace\": \"$AGENT_WS\""
-            echo '    }]'
-            echo '  }'
-            echo ""
-            echo -e "  Then restart:  ${CYAN}openclaw gateway restart${NC}"
+            echo -e "  Restart gateway: ${CYAN}openclaw gateway restart${NC}"
         fi
 
         cd "$SCRIPT_DIR"
