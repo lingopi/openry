@@ -375,30 +375,82 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
         $pluginOk = $true
 
         Push-Location $pluginDir
-        try {
-            # --ignore-scripts: skip better-sqlite3 native module download
-            # (which tries GitHub and hangs on poor connectivity)
-            npm install --ignore-scripts 2>&1 | Out-Null
-        } catch {
-            Write-Warn "npm install failed, skipping plugin"
-            $pluginOk = $false
-        }
 
-        if ($pluginOk) {
+        # ── Fast path: use pre-built bundle if available ──
+        $bundleFile = "orchestrator-plugin-bundle.tar.gz"
+        $bundleLocal = Join-Path $ScriptDir $bundleFile
+        $bundleVersion = "plugin-bundle-v1.0"
+        $useBundle = $false
+
+        if (Test-Path $bundleLocal) {
+            Write-Host "    Using local plugin bundle: $bundleLocal"
+            $useBundle = $true
+        } else {
+            # Try download from GitHub Release mirror
+            $bundleUrl = "https://ghfast.top/https://github.com/lingopi/openry/releases/download/$bundleVersion/$bundleFile"
+            $bundleTmp = "$env:TEMP\$bundleFile"
             try {
-                # Download better-sqlite3 prebuilt binary from mirrors
-                node scripts/download-native.mjs 2>&1 | Out-Null
-            } catch {
-                Write-Warn "Native module download failed (non-fatal, trying build...)"
+                Write-Host "    Downloading plugin bundle..."
+                curl -L -o $bundleTmp $bundleUrl --connect-timeout 30 --max-time 300 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0 -and (Test-Path $bundleTmp)) {
+                    $useBundle = $true
+                    $bundleLocal = $bundleTmp
+                }
+            } catch { }
+
+            # Try installing to project dir so it's available for future reinstalls
+            if ($useBundle) {
+                try {
+                    Copy-Item $bundleTmp (Join-Path $ScriptDir $bundleFile) -Force -ErrorAction SilentlyContinue
+                } catch { }
             }
         }
 
-        if ($pluginOk) {
+        if ($useBundle) {
             try {
-                npm run build 2>&1 | Out-Null
+                Write-Host "    Extracting plugin bundle (standalone, no network needed)..."
+                # Clean existing node_modules/dist first
+                Remove-Item -Recurse -Force "$pluginDir\node_modules" -ErrorAction SilentlyContinue
+                Remove-Item -Recurse -Force "$pluginDir\dist" -ErrorAction SilentlyContinue
+                tar -xzf $bundleLocal -C $pluginDir 2>&1 | Out-Null
+                Write-OK "Plugin bundle extracted"
             } catch {
-                Write-Warn "build failed, skipping plugin"
+                Write-Warn "Bundle extraction failed, falling back to npm install"
+                $useBundle = $false
+            } finally {
+                # Clean up temp download
+                if ($bundleLocal -eq "$env:TEMP\$bundleFile") {
+                    Remove-Item $bundleLocal -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+
+        if (-not $useBundle) {
+            try {
+                # --ignore-scripts: skip better-sqlite3 native module download
+                # (which tries GitHub and hangs on poor connectivity)
+                npm install --ignore-scripts 2>&1 | Out-Null
+            } catch {
+                Write-Warn "npm install failed, skipping plugin"
                 $pluginOk = $false
+            }
+
+            if ($pluginOk) {
+                try {
+                    # Download better-sqlite3 prebuilt binary from mirrors
+                    node scripts/download-native.mjs 2>&1 | Out-Null
+                } catch {
+                    Write-Warn "Native module download failed (non-fatal, trying build...)"
+                }
+            }
+
+            if ($pluginOk) {
+                try {
+                    npm run build 2>&1 | Out-Null
+                } catch {
+                    Write-Warn "build failed, skipping plugin"
+                    $pluginOk = $false
+                }
             }
         }
 
@@ -529,7 +581,12 @@ with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f
 
 Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Green
 Write-Host "║  OpenRY installation complete!                       ║" -ForegroundColor Green
-Write-Host "║  Restart your terminal or run: refrshPath            ║" -ForegroundColor Green
-Write-Host "║  Test: openry -c 'echo hello'                        ║" -ForegroundColor Green
 Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Green
+Write-Host ""
+Write-Host "  Next steps:" -ForegroundColor Cyan
+Write-Host "    1. openclaw gateway restart" -ForegroundColor White
+Write-Host "    2. openry serve --port 8080" -ForegroundColor White
+Write-Host "  Then open http://127.0.0.1:8080" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  Verify: openry -c 'echo hello'" -ForegroundColor DarkGray
 Write-Host ""
