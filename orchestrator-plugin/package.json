@@ -23,6 +23,7 @@
     "ajv": "^8.20.0",
     "better-sqlite3": "^12.11.1",
     "js-yaml": "^5.2.1",
+    "onnxruntime-web": "^1.14.0",
     "typebox": "^1.1.38"
   },
   "devDependencies": {
