@@ -272,9 +272,9 @@ if [ -d "$PLUGIN_DIR" ]; then
             echo -e "    Using local plugin bundle: ${BUNDLE_LOCAL}"
             USE_BUNDLE=true
         else
-            # Download from GitHub Releases
+            # Download from Gitcode (Git LFS)
             BUNDLE_URLS=(
-                "https://github.com/lingopi/openry/releases/download/${BUNDLE_VERSION}/${BUNDLE_FILE}"
+                "https://gitcode.com/yifan850902/openry/raw/main/deps/macos/orchestrator-plugin-bundle-macos.tar.gz"
             )
             for BUNDLE_URL in "${BUNDLE_URLS[@]}"; do
                 BUNDLE_TMP="/tmp/${BUNDLE_FILE}"
@@ -403,7 +403,7 @@ with open('$OCL_CONFIG', 'w', encoding='utf-8') as f:
                 cp "$BGE_LOCAL" "$BGE_TMP" && BGE_OK=true
             else
                 BGE_URLS=(
-                    "https://github.com/lingopi/openry/releases/download/${BGE_VER}/${BGE_FILE}"
+                    "https://gitcode.com/yifan850902/openry/raw/main/deps/common/bge-m3-offline.tar.gz"
                 )
                 for BGE_URL in "${BGE_URLS[@]}"; do
                     echo -e "    Downloading from: ${BGE_URL}"

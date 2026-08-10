@@ -376,9 +376,9 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
             Write-Host "    Using local plugin bundle: $bundleLocal"
             $useBundle = $true
         } else {
-            # Download from GitHub Releases
+            # Download from Gitcode (Git LFS)
             $bundleUrls = @(
-                "https://github.com/lingopi/openry/releases/download/$bundleVersion/$bundleFile"
+                "https://gitcode.com/yifan850902/openry/raw/main/deps/windows/orchestrator-plugin-bundle-win.tar.gz"
             )
             foreach ($bundleUrl in $bundleUrls) {
                 $bundleTmp = "$env:TEMP\$bundleFile"
@@ -532,7 +532,7 @@ with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f
                         $localMode = $true
                     } else {
                         $bgeUrls = @(
-                            "https://github.com/lingopi/openry/releases/download/$bgeVersion/$bgeFile"
+                            "https://gitcode.com/yifan850902/openry/raw/main/deps/common/bge-m3-offline.tar.gz"
                         )
                         foreach ($bgeUrl in $bgeUrls) {
                             Write-Host "    Downloading from: $bgeUrl"
