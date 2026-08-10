@@ -379,31 +379,9 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
             Write-Host "    Using local plugin bundle: $bundleLocal"
             $useBundle = $true
         } else {
-            # Download from Gitcode (Git LFS)
-            $bundleUrls = @(
-                "https://gitcode.com/yifan850902/openry/raw/main/deps/windows/orchestrator-plugin-bundle-win.tar.gz"
-            )
-            foreach ($bundleUrl in $bundleUrls) {
-                $bundleTmp = "$env:TEMP\$bundleFile"
-                try {
-                    Write-Host "    Downloading plugin bundle from: $bundleUrl"
-                    curl -L -o $bundleTmp $bundleUrl --connect-timeout 30 --max-time 300 2>&1 | Out-Null
-                    if ($LASTEXITCODE -eq 0 -and (Test-Path $bundleTmp)) {
-                        $useBundle = $true
-                        $bundleLocal = $bundleTmp
-                        break
-                    }
-                } catch { }
-            }
-
-            # Save to deps/windows/ for future reinstalls
-            if ($useBundle) {
-                try {
-                    $depsDir = Join-Path $ScriptDir "deps\windows"
-                    New-Item -ItemType Directory -Force -Path $depsDir | Out-Null
-                    Copy-Item $bundleTmp (Join-Path $depsDir $bundleFile) -Force -ErrorAction SilentlyContinue
-                } catch { }
-            }
+            Write-Err "Plugin bundle not found: $bundleLocal"
+            Write-Host "    Ensure Git LFS is enabled: git lfs pull"
+            $pluginOk = $false
         }
 
         if ($useBundle) {
@@ -481,18 +459,25 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
             try {
                 openclaw plugins install . --link 2>&1 | Out-Null
                 Write-OK "Plugin installed"
+            } catch {
+                Write-Warn "openclaw plugins install failed"
+                Write-Host "    Try: cd $pluginDir; openclaw plugins install . --link"
+                $pluginOk = $false
+            }
+        }
 
-                # ── Agent workspace already seeded from seed/agent-workspace/ ──
-                $agentWs = Join-Path $OpenryHome "agent-workspace"
+        # ── Agent registration + tool config (always, even if plugin existed) ──
+        if ($pluginOk) {
+            $agentWs = Join-Path $OpenryHome "agent-workspace"
+            try {
+                openclaw agents add openry-worker --workspace $agentWs --non-interactive --json 2>&1 | Out-Null
+                Write-OK "Agent 'openry-worker' registered"
+            } catch {
+                Write-Warn "Agent registration failed (may already exist)"
+            }
 
-                # Register the agent in OpenClaw (idempotent — skips if exists)
-                try {
-                    openclaw agents add openry-worker --workspace $agentWs --non-interactive --json 2>&1 | Out-Null
-                    Write-OK "Agent 'openry-worker' registered"
-
-                    # Configure agent tools to allow OpenRY plugin tools
-                    try {
-                        $pyConfigScript = @"
+            try {
+                $pyConfigScript = @"
 import json
 with open(r'$env:USERPROFILE\.openclaw\openclaw.json','r',encoding='utf-8') as f:
     c = json.load(f)
@@ -506,75 +491,60 @@ for a in c.get('agents',{}).get('list',[]):
 with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f:
     json.dump(c, f, indent=2, ensure_ascii=False)
 "@
-                        & $pythonCmd -c $pyConfigScript 2>&1 | Out-Null
-                        Write-OK "Agent tools configured (openry_run, openry_status, ...)"
-                    } catch {
-                        Write-Warn "Tools config failed (non-fatal)"
-                    }
-                } catch {
-                    Write-Warn "Agent registration failed (may already exist)"
-                }
-
-                # ── Install BGE-M3 model (local file or GitHub Release) ──
-                $bgeCacheDir = Join-Path $pluginDir "node_modules\@xenova\transformers\.cache\Xenova\bge-m3"
-                if (Test-Path $bgeCacheDir) {
-                    Write-Host "  BGE-M3 model already installed, skip" -ForegroundColor Cyan
-                } else {
-                Write-Host "  Installing BGE-M3 embedding model (one-time, ~400MB)..."
-                $bgeVersion = "bge-m3-v1.0"
-                $bgeFile = "bge-m3-offline.tar.gz"
-                $bgeLocal = "$ScriptDir\deps\common\$bgeFile"
-                $bgeTmp = "$env:TEMP\$bgeFile"
-                $bgeExtract = "$env:TEMP\bge-m3-extract"
-                $hfCache = "$env:USERPROFILE\.cache\huggingface\hub"
-                try {
-                    # Prefer local file if present
-                    if (Test-Path $bgeLocal) {
-                        Write-Host "    Using local file: $bgeLocal"
-                        $sourceFile = $bgeLocal
-                        $localMode = $true
-                    } else {
-                        $bgeUrls = @(
-                            "https://gitcode.com/yifan850902/openry/raw/main/deps/common/bge-m3-offline.tar.gz"
-                        )
-                        foreach ($bgeUrl in $bgeUrls) {
-                            Write-Host "    Downloading from: $bgeUrl"
-                            curl -L -o $bgeTmp $bgeUrl --connect-timeout 30 --max-time 600 2>&1 | Out-Null
-                            if ($LASTEXITCODE -eq 0) { break }
-                        }
-                        if ($LASTEXITCODE -ne 0) { throw "download failed" }
-                        $sourceFile = $bgeTmp
-                        $localMode = $false
-                    }
-                    Remove-Item -Recurse -Force $bgeExtract -ErrorAction SilentlyContinue
-                    New-Item -ItemType Directory -Force $bgeExtract | Out-Null
-                    tar -xzf $sourceFile -C $bgeExtract
-                    # Extract the inner model tar.gz to HF cache
-                    $modelTar = Get-ChildItem -Path $bgeExtract -Recurse -Filter "bge-m3-model.tar.gz" | Select-Object -First 1
-                    if ($modelTar) {
-                        New-Item -ItemType Directory -Force $hfCache | Out-Null
-                        tar -xzf $modelTar.FullName -C $hfCache
-                        Write-OK "BGE-M3 model installed"
-                    } else {
-                        # Flat structure: extract directly
-                        New-Item -ItemType Directory -Force $hfCache | Out-Null
-                        tar -xzf $sourceFile -C $hfCache --strip-components=1 2>$null
-                        Write-OK "BGE-M3 model installed"
-                    }
-                } catch {
-                    Write-Warn "BGE-M3 install failed (will download on first use)"
-                } finally {
-                    if (-not $localMode) {
-                        Remove-Item $bgeTmp -Force -ErrorAction SilentlyContinue
-                    }
-                    Remove-Item -Recurse -Force $bgeExtract -ErrorAction SilentlyContinue
-                }
-            }  # BGE-M3 already installed check
+                & $pythonCmd -c $pyConfigScript 2>&1 | Out-Null
+                Write-OK "Agent tools configured"
             } catch {
-                Write-Warn "openclaw plugins install failed"
-                Write-Host "    Try: cd $pluginDir; openclaw plugins install . --link"
+                Write-Warn "Tools config failed (non-fatal)"
             }
         }
+
+                # ── Install BGE-M3 model ──
+                if ($pluginOk) {
+                    $bgeCacheDir = Join-Path $pluginDir "node_modules\@xenova\transformers\.cache\Xenova\bge-m3"
+                    if (Test-Path $bgeCacheDir) {
+                        Write-Host "  BGE-M3 model already installed, skip" -ForegroundColor Cyan
+                    } else {
+                    Write-Host "  Installing BGE-M3 embedding model (one-time, ~400MB)..."
+                    $bgeVersion = "bge-m3-v1.0"
+                    $bgeFile = "bge-m3-offline.tar.gz"
+                    $bgeLocal = "$ScriptDir\deps\common\$bgeFile"
+                    $bgeTmp = "$env:TEMP\$bgeFile"
+                    $bgeExtract = "$env:TEMP\bge-m3-extract"
+                    $hfCache = "$env:USERPROFILE\.cache\huggingface\hub"
+                    try {
+                        # Prefer local file if present
+                        if (Test-Path $bgeLocal) {
+                            Write-Host "    Using local file: $bgeLocal"
+                            $sourceFile = $bgeLocal
+                            $localMode = $true
+                        } else {
+                            Write-Warn "BGE-M3 not found: $bgeLocal"
+                            Write-Host "    Ensure Git LFS is enabled: git lfs pull"
+                            throw "local file missing"
+                        }
+                        Remove-Item -Recurse -Force $bgeExtract -ErrorAction SilentlyContinue
+                        New-Item -ItemType Directory -Force $bgeExtract | Out-Null
+                        tar -xzf $sourceFile -C $bgeExtract
+                        $modelTar = Get-ChildItem -Path $bgeExtract -Recurse -Filter "bge-m3-model.tar.gz" | Select-Object -First 1
+                        if ($modelTar) {
+                            New-Item -ItemType Directory -Force $hfCache | Out-Null
+                            tar -xzf $modelTar.FullName -C $hfCache
+                            Write-OK "BGE-M3 model installed"
+                        } else {
+                            New-Item -ItemType Directory -Force $hfCache | Out-Null
+                            tar -xzf $sourceFile -C $hfCache --strip-components=1 2>$null
+                            Write-OK "BGE-M3 model installed"
+                        }
+                    } catch {
+                        Write-Warn "BGE-M3 install failed (will download on first use)"
+                    } finally {
+                        if (-not $localMode) {
+                            Remove-Item $bgeTmp -Force -ErrorAction SilentlyContinue
+                        }
+                        Remove-Item -Recurse -Force $bgeExtract -ErrorAction SilentlyContinue
+                    }
+                }  # BGE-M3 already installed
+                }  # $pluginOk for BGE-M3
         Pop-Location
         }  # plugin already installed check
     }

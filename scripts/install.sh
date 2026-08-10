@@ -252,40 +252,21 @@ if [ -d "$PLUGIN_DIR" ]; then
         if [ -d "$PLUGIN_DIR/node_modules" ] && [ -f "$PLUGIN_DIR/dist/index.js" ]; then
             echo -e "  ${CYAN}Plugin already installed, skip${NC}"
             PLUGIN_OK=true
-            # Still need to register with openclaw if config was wiped
-            if openclaw plugins list 2>/dev/null | grep -q orchestrator-plugin; then
-                echo -e "  ${CYAN}Plugin already registered, skip${NC}"
-            else
-                echo -e "  Re-registering plugin..."
-                openclaw plugins install . --link 2>/dev/null || true
-            fi
         else
             PLUGIN_OK=true
 
-        # ── Fast path: use pre-built bundle if available ──
+        # ── Use local bundle (cloned via Git LFS) ──
         BUNDLE_FILE="orchestrator-plugin-bundle-macos.tar.gz"
         BUNDLE_LOCAL="${SCRIPT_DIR}/deps/macos/${BUNDLE_FILE}"
-        BUNDLE_VERSION="plugin-bundle-v1.0"
         USE_BUNDLE=false
 
         if [ -f "$BUNDLE_LOCAL" ]; then
             echo -e "    Using local plugin bundle: ${BUNDLE_LOCAL}"
             USE_BUNDLE=true
         else
-            # Download from Gitcode (Git LFS)
-            BUNDLE_URLS=(
-                "https://gitcode.com/yifan850902/openry/raw/main/deps/macos/orchestrator-plugin-bundle-macos.tar.gz"
-            )
-            for BUNDLE_URL in "${BUNDLE_URLS[@]}"; do
-                BUNDLE_TMP="/tmp/${BUNDLE_FILE}"
-                if curl -fsSL --connect-timeout 30 --max-time 300 -o "$BUNDLE_TMP" "$BUNDLE_URL" 2>/dev/null && [ -f "$BUNDLE_TMP" ]; then
-                    USE_BUNDLE=true
-                    BUNDLE_LOCAL="$BUNDLE_TMP"
-                    mkdir -p "${SCRIPT_DIR}/deps/macos"
-                    cp "$BUNDLE_TMP" "${SCRIPT_DIR}/deps/macos/${BUNDLE_FILE}" 2>/dev/null || true
-                    break
-                fi
-            done
+            echo -e "  ${RED}✗ Plugin bundle not found: ${BUNDLE_LOCAL}${NC}"
+            echo -e "    Ensure Git LFS is enabled: git lfs pull"
+            PLUGIN_OK=false
         fi
 
         if [ "$USE_BUNDLE" = true ]; then
@@ -402,16 +383,8 @@ with open('$OCL_CONFIG', 'w', encoding='utf-8') as f:
                 echo -e "    Using local file: ${BGE_LOCAL}"
                 cp "$BGE_LOCAL" "$BGE_TMP" && BGE_OK=true
             else
-                BGE_URLS=(
-                    "https://gitcode.com/yifan850902/openry/raw/main/deps/common/bge-m3-offline.tar.gz"
-                )
-                for BGE_URL in "${BGE_URLS[@]}"; do
-                    echo -e "    Downloading from: ${BGE_URL}"
-                    if curl -fsSL --connect-timeout 30 -o "$BGE_TMP" "$BGE_URL"; then
-                        BGE_OK=true
-                        break
-                    fi
-                done
+                echo -e "  ${YELLOW}⚠ BGE-M3 not found: ${BGE_LOCAL}${NC}"
+                echo -e "    Ensure Git LFS is enabled: git lfs pull"
             fi
 
             if [ "$BGE_OK" = true ]; then
