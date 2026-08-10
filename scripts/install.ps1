@@ -370,9 +370,8 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
             Write-Host "    Using local plugin bundle: $bundleLocal"
             $useBundle = $true
         } else {
-            # Try Aliyun OSS first, GitHub as fallback
+            # Download from GitHub Releases
             $bundleUrls = @(
-                "https://lingopi-audio-dev.oss-cn-beijing.aliyuncs.com/openry/windows/orchestrator-plugin-bundle.tar.gz",
                 "https://github.com/lingopi/openry/releases/download/$bundleVersion/$bundleFile"
             )
             foreach ($bundleUrl in $bundleUrls) {
@@ -523,7 +522,6 @@ with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f
                         $localMode = $true
                     } else {
                         $bgeUrls = @(
-                            "https://gitee.com/openry/openry/releases/download/$bgeVersion/$bgeFile",
                             "https://github.com/lingopi/openry/releases/download/$bgeVersion/$bgeFile"
                         )
                         foreach ($bgeUrl in $bgeUrls) {

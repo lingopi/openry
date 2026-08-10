@@ -259,9 +259,8 @@ if [ -d "$PLUGIN_DIR" ]; then
             echo -e "    Using local plugin bundle: ${BUNDLE_LOCAL}"
             USE_BUNDLE=true
         else
-            # Try Aliyun OSS first, GitHub as fallback (once uploaded)
+            # Download from GitHub Releases
             BUNDLE_URLS=(
-                "https://lingopi-audio-dev.oss-cn-beijing.aliyuncs.com/openry/macos/orchestrator-plugin-bundle.tar.gz"
                 "https://github.com/lingopi/openry/releases/download/${BUNDLE_VERSION}/${BUNDLE_FILE}"
             )
             for BUNDLE_URL in "${BUNDLE_URLS[@]}"; do
@@ -382,9 +381,7 @@ with open('$OCL_CONFIG', 'w', encoding='utf-8') as f:
                 echo -e "    Using local file: ${BGE_LOCAL}"
                 cp "$BGE_LOCAL" "$BGE_TMP" && BGE_OK=true
             else
-                # Try Gitee first, GitHub as fallback
                 BGE_URLS=(
-                    "https://gitee.com/openry/openry/releases/download/${BGE_VER}/${BGE_FILE}"
                     "https://github.com/lingopi/openry/releases/download/${BGE_VER}/${BGE_FILE}"
                 )
                 for BGE_URL in "${BGE_URLS[@]}"; do
