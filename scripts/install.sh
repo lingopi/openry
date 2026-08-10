@@ -211,8 +211,9 @@ echo ""
 # ── 9. Verify ────────────────────────────────────────────────────────────
 
 echo -e "  Verifying openry..."
-if openry -c 'echo "install OK"' 2>/dev/null | grep -q "install OK"; then
-    OPENRY_BIN=$(which openry 2>/dev/null || echo "$WRAPPER_BIN/openry")
+# Use wrapper directly — PATH may not be updated in parent shell
+OPENRY_BIN="$WRAPPER_BIN/openry"
+if [ -x "$OPENRY_BIN" ] && "$OPENRY_BIN" -c 'echo "install OK"' 2>/dev/null | grep -q "install OK"; then
     echo -e "  ${GREEN}✓ openry is ready${NC}  (${CYAN}${OPENRY_BIN}${NC})"
 else
     echo -e "  ${RED}✗ Verification failed${NC}"
@@ -395,8 +396,9 @@ echo -e "${GREEN}${BOLD}║     OpenRY installation complete!                ║
 echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  ${CYAN}Next steps:${NC}"
-echo -e "    1. ${BOLD}openclaw gateway restart${NC}"
-echo -e "    2. ${BOLD}openry serve${NC}"
+echo -e "    1. ${BOLD}${YELLOW}source $SHELL_RC${NC}  ${CYAN}(or restart terminal — needed once)${NC}"
+echo -e "    2. ${BOLD}openclaw gateway restart${NC}"
+echo -e "    3. ${BOLD}openry serve${NC}"
 echo "  Then open http://127.0.0.1:\${OPENRY_PORT:-8080}"
 echo ""
 echo -e "  ${CYAN}Quick test:${NC}"
