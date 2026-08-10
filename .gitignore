@@ -9,12 +9,7 @@ venv/
 .openry/
 *.db
 design/
-docs/day*.md
-docs/knowql-agent-prompt.md
-docs/phase2-orchestrator-plugin-audit.md
-docs/pitfalls.md
-docs/state-machine-analysis.md
-docs/compositions-and-workflows-guide.md
+docs/
 recode.md
 session执行过程.md
 openclaw-latest/
