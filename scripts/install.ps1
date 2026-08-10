@@ -406,6 +406,23 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
                 Remove-Item -Recurse -Force "$pluginDir\dist" -ErrorAction SilentlyContinue
                 tar -xzf $bundleLocal -C $pluginDir 2>&1 | Out-Null
                 Write-OK "Plugin bundle extracted"
+                # Verify dist/ exists; if not, rebuild from source
+                if (-not (Test-Path (Join-Path $pluginDir "dist\index.js"))) {
+                    Write-Warn "dist\index.js missing, rebuilding..."
+                    try {
+                        Push-Location $pluginDir
+                        npm run build 2>&1 | Out-Null
+                        Pop-Location
+                        if (Test-Path (Join-Path $pluginDir "dist\index.js")) {
+                            Write-OK "Plugin rebuilt"
+                        } else {
+                            Write-Warn "Build failed, plugin may not load"
+                        }
+                    } catch {
+                        Pop-Location -ErrorAction SilentlyContinue
+                        Write-Warn "Build failed"
+                    }
+                }
             } catch {
                 Write-Warn "Bundle extraction failed, falling back to npm install"
                 $useBundle = $false
@@ -444,6 +461,12 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
                     $pluginOk = $false
                 }
             }
+        }
+
+        # Final check: plugin must have dist/index.js to be loadable
+        if (-not (Test-Path (Join-Path $pluginDir "dist\index.js"))) {
+            Write-Err "Plugin dist\index.js not found — skipping registration"
+            $pluginOk = $false
         }
 
         if ($pluginOk) {

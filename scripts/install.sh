@@ -281,6 +281,17 @@ if [ -d "$PLUGIN_DIR" ]; then
             rm -rf "$PLUGIN_DIR/node_modules" "$PLUGIN_DIR/dist" 2>/dev/null || true
             if tar -xzf "$BUNDLE_LOCAL" -C "$PLUGIN_DIR" 2>/dev/null; then
                 echo -e "  ${GREEN}✓${NC} Plugin bundle extracted"
+                # Verify dist/ exists; if not, rebuild from source
+                if [ ! -f "$PLUGIN_DIR/dist/index.js" ]; then
+                    echo -e "  ${YELLOW}⚠ dist/index.js missing, rebuilding...${NC}"
+                    cd "$PLUGIN_DIR" && npm run build 2>/dev/null || true
+                    cd "$SCRIPT_DIR"
+                    if [ -f "$PLUGIN_DIR/dist/index.js" ]; then
+                        echo -e "  ${GREEN}✓${NC} Plugin rebuilt"
+                    else
+                        echo -e "  ${RED}✗ Build failed, plugin may not load${NC}"
+                    fi
+                fi
             else
                 echo -e "  ${YELLOW}⚠ Bundle extraction failed, falling back to npm...${NC}"
                 USE_BUNDLE=false
@@ -310,6 +321,12 @@ if [ -d "$PLUGIN_DIR" ]; then
                     PLUGIN_OK=false
                 }
             fi
+        fi
+
+        # Final check: plugin must have dist/index.js to be loadable
+        if [ ! -f "$PLUGIN_DIR/dist/index.js" ]; then
+            echo -e "  ${RED}✗ Plugin dist/index.js not found — skipping registration${NC}"
+            PLUGIN_OK=false
         fi
 
         if $PLUGIN_OK; then
