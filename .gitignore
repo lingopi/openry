@@ -25,7 +25,7 @@ openclaw-latest/
 /policies/
 bundle-openry.sh
 
-# Dependencies & release assets — published to GitHub Releases, not in git
-deps/
+# Dependencies & release assets — managed by Git LFS
+deps/macos/openry-macos-full.tar.gz
 bge-m3-offline.tar.gz
 orchestrator-plugin-bundle.tar.gz
