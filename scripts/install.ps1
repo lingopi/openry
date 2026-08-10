@@ -227,38 +227,41 @@ Push-Location $ScriptDir
 
 try {
     & $pythonCmd -m pip install -e . --quiet 2>&1 | Out-Null
-    # Verify it's on PATH
-    $openryPath = (Get-Command openry -ErrorAction SilentlyContinue).Source
-    if ($openryPath) {
-        Write-OK "openry installed via pip  ($openryPath)"
+    # Find where pip put openry
+    $scriptsDir = Split-Path -Parent (& $pythonCmd -c "import sys; print(sys.executable)")
+    $scriptsDir = Join-Path (Split-Path -Parent $scriptsDir) "Scripts"
+    $openryExe = Join-Path $scriptsDir "openry.exe"
+
+    if (Test-Path $openryExe) {
+        Write-OK "openry installed  ($openryExe)"
+        # Add to permanent User PATH
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if ($userPath -notlike "*$scriptsDir*") {
+            [Environment]::SetEnvironmentVariable("Path", "$userPath;$scriptsDir", "User")
+        }
+        # Also add to current session
+        if ($env:Path -notlike "*$scriptsDir*") {
+            $env:Path = "$scriptsDir;$env:Path"
+        }
     } else {
-        # May be in Python Scripts dir but not on PATH
-        $scriptsDir = Split-Path -Parent (& $pythonCmd -c "import sys; print(sys.executable)")
-        $scriptsDir = Join-Path (Split-Path -Parent $scriptsDir) "Scripts"
-        $openryExe = Join-Path $scriptsDir "openry.exe"
-        if (Test-Path $openryExe) {
-            Write-OK "openry installed  ($openryExe)"
-            # Add to User PATH
-            $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-            if ($userPath -notlike "*$scriptsDir*") {
-                [Environment]::SetEnvironmentVariable("Path", "$userPath;$scriptsDir", "User")
-                $env:Path = "$env:Path;$scriptsDir"
-                Write-Warn "Added Python Scripts to User PATH: $scriptsDir"
-            }
-        } else {
-            Write-Warn "openry not found on PATH. Creating wrapper..."
-            # Fallback: create a wrapper batch file
-            $wrapperDir = "$env:USERPROFILE\.local\bin"
-            New-Item -ItemType Directory -Force -Path $wrapperDir | Out-Null
-            @"
+        Write-Warn "openry.exe not found, creating wrapper..."
+        $wrapperDir = "$env:USERPROFILE\.local\bin"
+        New-Item -ItemType Directory -Force -Path $wrapperDir | Out-Null
+        @"
 @echo off
 set OPENRY_HOME=%OPENRY_HOME%
 set PYTHONPATH=$ScriptDir;%PYTHONPATH%
 $pythonCmd -m openry %*
 "@ | Out-File -FilePath "$wrapperDir\openry.cmd" -Encoding ASCII
-            Write-OK "Wrapper created: $wrapperDir\openry.cmd"
-            # Ensure wrapper dir is in current session PATH
-            $env:Path = "$env:Path;$wrapperDir"
+        Write-OK "Wrapper created: $wrapperDir\openry.cmd"
+        # Add to permanent User PATH
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if ($userPath -notlike "*$wrapperDir*") {
+            [Environment]::SetEnvironmentVariable("Path", "$userPath;$wrapperDir", "User")
+        }
+        # Current session
+        if ($env:Path -notlike "*$wrapperDir*") {
+            $env:Path = "$wrapperDir;$env:Path"
         }
     }
 } catch {
