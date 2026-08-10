@@ -842,6 +842,74 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False))
 
 
+def _run_cmd(cmd: list[str], **kwargs) -> bool:
+    """Run a command, returning True on success. Never raises."""
+    try:
+        if sys.platform == "win32" and cmd[0] in ("openclaw",):
+            # On Windows, Node.js global tools may need .cmd extension
+            import shutil as _shutil
+            resolved = _shutil.which(cmd[0])
+            if resolved:
+                cmd = [resolved] + cmd[1:]
+        subprocess.run(cmd, capture_output=True, timeout=kwargs.pop("timeout", 15), **kwargs)
+        return True
+    except FileNotFoundError:
+        print(f"  ⚠ Command not found: {cmd[0]} (skip)")
+        return False
+    except Exception as e:
+        print(f"  ⚠ Failed: {e}")
+        return False
+
+
+def _kill_openry_processes() -> None:
+    """Kill openry processes that may hold DB lock."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/IM", "python.exe"],
+                           capture_output=True, timeout=5)
+        else:
+            subprocess.run(["pkill", "-f", "openry"],
+                           capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+def _clean_shell_config(home: Path) -> None:
+    """Remove OpenRY entries from shell config."""
+    if sys.platform == "win32":
+        # Windows: remove OPENRY_HOME user environment variable
+        try:
+            import subprocess as _sp
+            _sp.run(["setx", "OPENRY_HOME", ""], capture_output=True, timeout=5)
+            print("  ✓ OPENRY_HOME env var cleared")
+        except Exception as e:
+            print(f"  ⚠ Could not clear OPENRY_HOME: {e}")
+        return
+
+    # Unix: clean .zshrc / .bashrc / .profile
+    shell_rc = _detect_shell_rc()
+    if not shell_rc.exists():
+        return
+    try:
+        lines = shell_rc.read_text(encoding="utf-8").splitlines(keepends=True)
+        filtered = []
+        skip = 0
+        for line in lines:
+            if skip > 0:
+                skip -= 1
+                continue
+            if "# Added by OpenRY installer" in line:
+                skip = 2
+                continue
+            if "OPENRY_HOME" in line and "# Added by OpenRY" not in line:
+                continue
+            filtered.append(line)
+        shell_rc.write_text("".join(filtered), encoding="utf-8")
+        print(f"  ✓ OpenRY entries removed from {shell_rc}")
+    except Exception as e:
+        print(f"  ⚠ Could not update {shell_rc}: {e}")
+
+
 def cmd_uninstall(args: argparse.Namespace) -> None:
     """Uninstall OpenRY: remove data directory, clean shell config.
 
@@ -852,12 +920,10 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
       bash scripts/uninstall.sh --full --force
     """
     import shutil
-    import subprocess
     from pathlib import Path
 
     home = Path.home()
     openry_home = Path(os.environ.get("OPENRY_HOME", home / ".openry"))
-    shell_rc = _detect_shell_rc()
 
     if not args.force:
         scope = "EVERYTHING" if args.with_openclaw else "OpenRY data"
@@ -867,23 +933,20 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
             print("Aborted.")
             return
 
-    # ── 1. Stop gateway (--full only) ──
+    # ── 1. Stop gateway (--with-openclaw only) ──
     if args.with_openclaw:
         print("Stopping OpenClaw gateway...")
-        subprocess.run(["openclaw", "gateway", "stop"],
-                       capture_output=True, timeout=10)
+        _run_cmd(["openclaw", "gateway", "stop"], timeout=10)
         print("  ✓ Gateway stopped")
 
-    # ── 2. Unregister plugin (--full only) ──
+    # ── 2. Unregister plugin (--with-openclaw only) ──
     if args.with_openclaw:
         print("Unregistering orchestrator-plugin...")
-        subprocess.run(
-            ["openclaw", "plugins", "uninstall", "orchestrator-plugin"],
-            input=b"y\n", capture_output=True, timeout=15,
-        )
+        _run_cmd(["openclaw", "plugins", "uninstall", "orchestrator-plugin"],
+                 input=b"y\n", timeout=15)
         print("  ✓ Plugin unregistered")
 
-    # ── 3. Remove agent from openclaw.json (--full only) ──
+    # ── 3. Remove agent from openclaw.json (--with-openclaw only) ──
     if args.with_openclaw:
         ocl_config = home / ".openclaw" / "openclaw.json"
         if ocl_config.exists():
@@ -902,8 +965,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     # ── 4. Remove ~/.openry data ──
     if not args.keep_data:
         if openry_home.exists():
-            # Kill any openry processes holding DB lock
-            subprocess.run(["pkill", "-f", "openry"], capture_output=True, timeout=5)
+            _kill_openry_processes()
             import time as _time
             _time.sleep(0.5)
 
@@ -918,34 +980,17 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
             shutil.rmtree(openry_home, ignore_errors=True)
             print(f"  ✓ Removed {openry_home}")
         else:
-            print(f"  ~/.openry not found, skip")
+            print("  ~/.openry not found, skip")
     else:
         print("  Keeping ~/.openry (--keep-data)")
 
     # ── 5. Clean shell config ──
-    if not args.keep_env and shell_rc.exists():
-        try:
-            lines = shell_rc.read_text(encoding="utf-8").splitlines(keepends=True)
-            filtered = []
-            skip = 0
-            for line in lines:
-                if skip > 0:
-                    skip -= 1
-                    continue
-                if "# Added by OpenRY installer" in line:
-                    skip = 2  # skip the marker line + next 2 lines (export OPENRY_HOME + PATH)
-                    continue
-                if "OPENRY_HOME" in line and "# Added by OpenRY" not in line:
-                    continue  # stray OPENRY_HOME reference
-                filtered.append(line)
-            shell_rc.write_text("".join(filtered), encoding="utf-8")
-            print(f"  ✓ OpenRY entries removed from {shell_rc}")
-        except Exception as e:
-            print(f"  ⚠ Could not update {shell_rc}: {e}")
-    elif args.keep_env:
+    if not args.keep_env:
+        _clean_shell_config(home)
+    else:
         print("  Keeping shell config (--keep-env)")
 
-    # ── 6. Model cache (--full only) ──
+    # ── 6. Model cache (--with-openclaw only) ──
     if args.with_openclaw:
         for cache_dir in [home / ".cache" / "huggingface", home / ".cache" / "transformers"]:
             if cache_dir.exists():
@@ -970,17 +1015,24 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
 
 def _spawn_self_uninstall(home: Path) -> None:
     """Remove wrapper scripts and spawn background pip uninstall.
-    
+
     Wrapper scripts are removed immediately (they're not the running process).
     pip uninstall is spawned as a detached background process.
     """
-    import subprocess
+    import subprocess as _sp
 
     # 1. Remove wrapper scripts (safe — not the running Python)
-    wrapper_paths = [
-        home / ".local" / "bin" / "openry",
-        home / "bin" / "openry",
-    ]
+    if sys.platform == "win32":
+        wrapper_paths = [
+            home / ".local" / "bin" / "openry.cmd",
+            home / "bin" / "openry.cmd",
+            home / ".local" / "bin" / "openry.bat",
+        ]
+    else:
+        wrapper_paths = [
+            home / ".local" / "bin" / "openry",
+            home / "bin" / "openry",
+        ]
     for wp in wrapper_paths:
         if wp.exists():
             try:
@@ -990,14 +1042,21 @@ def _spawn_self_uninstall(home: Path) -> None:
                 pass
 
     # 2. Spawn detached pip uninstall (runs after we exit)
-    # Use 'nohup' + shell delay for maximum reliability
-    subprocess.Popen(
-        ["nohup", "bash", "-c",
-         "sleep 2 && python3 -m pip uninstall openry -y >/dev/null 2>&1"],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    if sys.platform == "win32":
+        # Windows: use start /B for background
+        _sp.Popen(
+            ["cmd", "/c", "timeout /t 2 >nul && python -m pip uninstall openry -y >nul 2>&1"],
+            creationflags=0x00000008,  # DETACHED_PROCESS
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        )
+    else:
+        # Unix: nohup + bash delay
+        _sp.Popen(
+            ["nohup", "bash", "-c",
+             "sleep 2 && python3 -m pip uninstall openry -y >/dev/null 2>&1"],
+            start_new_session=True,
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        )
 
 
 def _detect_shell_rc() -> Path:

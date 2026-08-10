@@ -15,11 +15,12 @@ FULL=""
 FORCE=""
 KEEP_DATA=""
 KEEP_ENV=""
+WITH_OC=""
 
 for arg in "$@"; do
     case "$arg" in
         --force|-f)      FORCE="--force" ;;
-        --all|-a|--full) FULL="--full" ;;
+        --all|-a|--full) WITH_OC="--with-openclaw" ;;
         --keep-data)     KEEP_DATA="--keep-data" ;;
         --keep-env)      KEEP_ENV="--keep-env" ;;
         --skip-gateway)  ;;  # no-op: gateway handled by CLI now
@@ -39,4 +40,4 @@ if ! command -v openry &>/dev/null; then
     exit 0
 fi
 
-openry uninstall --with-openclaw $FORCE $KEEP_DATA $KEEP_ENV
+openry uninstall $WITH_OC $FORCE $KEEP_DATA $KEEP_ENV

@@ -2,11 +2,8 @@
 # OpenRY — Windows Uninstaller (PowerShell)
 # ============================================================================
 # Usage:
-#   pwsh -File uninstall.ps1                     # Keep data, interactive
-#   pwsh -File uninstall.ps1 -Full -Force         # Remove everything
-#
-# Thin wrapper around 'openry uninstall'.
-# Run 'openry uninstall --help' for all options.
+#   pwsh -File uninstall.ps1                     # Data only, keep CLI
+#   pwsh -File uninstall.ps1 -Full -Force        # Everything (data + plugin + CLI)
 # ============================================================================
 
 param(
@@ -22,7 +19,8 @@ if (-not (Get-Command openry -ErrorAction SilentlyContinue)) {
     exit 0
 }
 
-$openryArgs = @("--with-openclaw")
+$openryArgs = @()
+if ($Full)     { $openryArgs += "--with-openclaw" }
 if ($Force)    { $openryArgs += "--force" }
 if ($KeepData) { $openryArgs += "--keep-data" }
 if ($KeepEnv)  { $openryArgs += "--keep-env" }
