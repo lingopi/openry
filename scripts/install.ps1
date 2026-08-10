@@ -370,9 +370,9 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
             Write-Host "    Using local plugin bundle: $bundleLocal"
             $useBundle = $true
         } else {
-            # Try Gitee first, GitHub as fallback
+            # Try Aliyun OSS first, GitHub as fallback
             $bundleUrls = @(
-                "https://gitee.com/openry/openry/releases/download/$bundleVersion/$bundleFile",
+                "https://lingopi-audio-dev.oss-cn-beijing.aliyuncs.com/openry/windows/orchestrator-plugin-bundle.tar.gz",
                 "https://github.com/lingopi/openry/releases/download/$bundleVersion/$bundleFile"
             )
             foreach ($bundleUrl in $bundleUrls) {
