@@ -74,20 +74,19 @@ deps/
 ### 卸载
 
 ```bash
-# 保留用户数据（DB + 工作流 + 模型缓存）
-bash scripts/uninstall.sh
+# 只清除数据，保留 CLI 和插件
+openry uninstall -f
 
-# 彻底清除一切（含 DB + 工作流 + AI 模型缓存）
-bash scripts/uninstall.sh --force --all
+# 彻底清除一切（数据 + 插件 + 网关 + CLI 自身）
+openry uninstall --with-openclaw -f
 ```
 
 | 选项 | 说明 |
 |------|------|
-| `--force` | 跳过确认提示 |
-| `--all` | 删除 `~/.openry` 数据目录 + HuggingFace 模型缓存 |
-| `--keep-data` | 保留 `~/.openry`（默认行为） |
+| `--with-openclaw` | 同时清理 OpenClaw 集成（停网关、卸插件、删 agent、清模型缓存） |
+| `--force` / `-f` | 跳过确认提示 |
+| `--keep-data` | 保留 `~/.openry` 数据目录 |
 | `--keep-env` | 保留 shell 环境变量配置 |
-| `--skip-gateway` | 不停止 OpenClaw Gateway |
 
 ### 启动
 
@@ -199,20 +198,19 @@ For offline install, place pre-built dependency tarballs in `deps/{common,macos,
 ### Uninstall
 
 ```bash
-# Keep user data (DB + workflows + model cache)
-bash scripts/uninstall.sh
+# Remove data only (keep CLI and plugin)
+openry uninstall -f
 
-# Complete removal (DB + workflows + AI model cache)
-bash scripts/uninstall.sh --force --all
+# Complete removal (data + plugin + gateway + CLI itself)
+openry uninstall --with-openclaw -f
 ```
 
 | Option | Description |
 |--------|-------------|
-| `--force` | Skip confirmation prompts |
-| `--all` | Remove `~/.openry` data dir + HuggingFace model cache |
-| `--keep-data` | Keep `~/.openry` (default behavior) |
+| `--with-openclaw` | Also clean OpenClaw integration (stop gateway, unregister plugin, remove agent, clear model cache) |
+| `--force` / `-f` | Skip confirmation prompts |
+| `--keep-data` | Keep `~/.openry` data directory |
 | `--keep-env` | Keep shell environment variable config |
-| `--skip-gateway` | Don't stop OpenClaw Gateway |
 
 ### Architecture
 

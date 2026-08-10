@@ -181,18 +181,21 @@ else
         echo "export OPENRY_HOME=\"${OPENRY_HOME}\""
         echo "export PATH=\"$WRAPPER_BIN:\$PATH\""
     } >> "$SHELL_RC"
-    echo -e "  ${YELLOW}⚠ Added ${WRAPPER_BIN} + OPENRY_HOME to ${SHELL_RC}${NC}"
-    echo "    Restart your terminal or run: source $SHELL_RC"
 fi
+
+# Ensure ~/.local/bin is in PATH for current session immediately
+export PATH="$WRAPPER_BIN:$PATH"
+export OPENRY_HOME="$OPENRY_HOME"
 
 # ── 8. Initialize .openry/ from seed ──────────────────────────────────────
 
 SEED_DIR="${SCRIPT_DIR}/seed"
 if [ -d "$SEED_DIR" ]; then
+    mkdir -p "$OPENRY_HOME"
     cp -r "$SEED_DIR"/* "$OPENRY_HOME/" 2>/dev/null || true
-    WF_COUNT=$(ls "$OPENRY_HOME/workflows/"*.yaml 2>/dev/null | wc -l | tr -d ' ')
-    CP_COUNT=$(ls "$OPENRY_HOME/compositions/"*.yaml 2>/dev/null | wc -l | tr -d ' ')
-    PM_COUNT=$(ls "$OPENRY_HOME/prompts/"*.md 2>/dev/null | wc -l | tr -d ' ')
+    WF_COUNT=$(ls "$OPENRY_HOME/workflows/"*.yaml 2>/dev/null | wc -l | tr -d ' ') || true
+    CP_COUNT=$(ls "$OPENRY_HOME/compositions/"*.yaml 2>/dev/null | wc -l | tr -d ' ') || true
+    PM_COUNT=$(ls "$OPENRY_HOME/prompts/"*.md 2>/dev/null | wc -l | tr -d ' ') || true
     echo -e "  ${GREEN}✓${NC} Initialized ${CYAN}${OPENRY_HOME}${NC} from seed/"
     echo "    workflows: ${WF_COUNT} files, compositions: ${CP_COUNT} files, prompts: ${PM_COUNT} files"
 else

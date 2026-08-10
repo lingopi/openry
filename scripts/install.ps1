@@ -257,6 +257,8 @@ set PYTHONPATH=$ScriptDir;%PYTHONPATH%
 $pythonCmd -m openry %*
 "@ | Out-File -FilePath "$wrapperDir\openry.cmd" -Encoding ASCII
             Write-OK "Wrapper created: $wrapperDir\openry.cmd"
+            # Ensure wrapper dir is in current session PATH
+            $env:Path = "$env:Path;$wrapperDir"
         }
     }
 } catch {

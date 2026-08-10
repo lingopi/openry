@@ -842,6 +842,177 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False))
 
 
+def cmd_uninstall(args: argparse.Namespace) -> None:
+    """Uninstall OpenRY: remove data directory, clean shell config.
+
+    openry uninstall                   # Remove ~/.openry, clean shell config
+    openry uninstall --with-openclaw   # Also stop gateway, unregister plugin, remove agent
+
+    Note: To also remove the CLI binary, use the shell script:
+      bash scripts/uninstall.sh --full --force
+    """
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    home = Path.home()
+    openry_home = Path(os.environ.get("OPENRY_HOME", home / ".openry"))
+    shell_rc = _detect_shell_rc()
+
+    if not args.force:
+        scope = "EVERYTHING" if args.with_openclaw else "OpenRY data"
+        print(f"This will remove {scope}. Continue? (y/N) ", end="")
+        confirm = input().strip().lower()
+        if confirm not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    # ── 1. Stop gateway (--full only) ──
+    if args.with_openclaw:
+        print("Stopping OpenClaw gateway...")
+        subprocess.run(["openclaw", "gateway", "stop"],
+                       capture_output=True, timeout=10)
+        print("  ✓ Gateway stopped")
+
+    # ── 2. Unregister plugin (--full only) ──
+    if args.with_openclaw:
+        print("Unregistering orchestrator-plugin...")
+        subprocess.run(
+            ["openclaw", "plugins", "uninstall", "orchestrator-plugin"],
+            input=b"y\n", capture_output=True, timeout=15,
+        )
+        print("  ✓ Plugin unregistered")
+
+    # ── 3. Remove agent from openclaw.json (--full only) ──
+    if args.with_openclaw:
+        ocl_config = home / ".openclaw" / "openclaw.json"
+        if ocl_config.exists():
+            try:
+                import json as _json
+                with open(ocl_config, "r", encoding="utf-8") as f:
+                    cfg = _json.load(f)
+                agents = cfg.get("agents", {}).get("list", [])
+                cfg["agents"]["list"] = [a for a in agents if a.get("id") != "openry-worker"]
+                with open(ocl_config, "w", encoding="utf-8") as f:
+                    _json.dump(cfg, f, indent=2, ensure_ascii=False)
+                print("  ✓ Agent 'openry-worker' removed from openclaw.json")
+            except Exception as e:
+                print(f"  ⚠ Could not update openclaw.json: {e}")
+
+    # ── 4. Remove ~/.openry data ──
+    if not args.keep_data:
+        if openry_home.exists():
+            # Kill any openry processes holding DB lock
+            subprocess.run(["pkill", "-f", "openry"], capture_output=True, timeout=5)
+            import time as _time
+            _time.sleep(0.5)
+
+            # Remove DB files first (often locked)
+            for db_file in ["openry.db", "openry.db-wal", "openry.db-shm"]:
+                fp = openry_home / db_file
+                try:
+                    fp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            shutil.rmtree(openry_home, ignore_errors=True)
+            print(f"  ✓ Removed {openry_home}")
+        else:
+            print(f"  ~/.openry not found, skip")
+    else:
+        print("  Keeping ~/.openry (--keep-data)")
+
+    # ── 5. Clean shell config ──
+    if not args.keep_env and shell_rc.exists():
+        try:
+            lines = shell_rc.read_text(encoding="utf-8").splitlines(keepends=True)
+            filtered = []
+            skip = 0
+            for line in lines:
+                if skip > 0:
+                    skip -= 1
+                    continue
+                if "# Added by OpenRY installer" in line:
+                    skip = 2  # skip the marker line + next 2 lines (export OPENRY_HOME + PATH)
+                    continue
+                if "OPENRY_HOME" in line and "# Added by OpenRY" not in line:
+                    continue  # stray OPENRY_HOME reference
+                filtered.append(line)
+            shell_rc.write_text("".join(filtered), encoding="utf-8")
+            print(f"  ✓ OpenRY entries removed from {shell_rc}")
+        except Exception as e:
+            print(f"  ⚠ Could not update {shell_rc}: {e}")
+    elif args.keep_env:
+        print("  Keeping shell config (--keep-env)")
+
+    # ── 6. Model cache (--full only) ──
+    if args.with_openclaw:
+        for cache_dir in [home / ".cache" / "huggingface", home / ".cache" / "transformers"]:
+            if cache_dir.exists():
+                try:
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                    print(f"  ✓ Removed {cache_dir}")
+                except Exception:
+                    print(f"  ⚠ Could not remove {cache_dir}")
+
+    # ── 7. Self-uninstall (detached background process) ──
+    if args.with_openclaw:
+        print()
+        print("  Removing openry CLI in background...")
+        _spawn_self_uninstall(home)
+        print("  Done. The openry command will be gone in a moment.")
+    else:
+        print()
+        print("  OpenRY data removed.")
+        print("  For complete cleanup: openry uninstall --with-openclaw --force")
+    print()
+
+
+def _spawn_self_uninstall(home: Path) -> None:
+    """Remove wrapper scripts and spawn background pip uninstall.
+    
+    Wrapper scripts are removed immediately (they're not the running process).
+    pip uninstall is spawned as a detached background process.
+    """
+    import subprocess
+
+    # 1. Remove wrapper scripts (safe — not the running Python)
+    wrapper_paths = [
+        home / ".local" / "bin" / "openry",
+        home / "bin" / "openry",
+    ]
+    for wp in wrapper_paths:
+        if wp.exists():
+            try:
+                wp.unlink()
+                print(f"  ✓ Removed wrapper: {wp}")
+            except Exception:
+                pass
+
+    # 2. Spawn detached pip uninstall (runs after we exit)
+    # Use 'nohup' + shell delay for maximum reliability
+    subprocess.Popen(
+        ["nohup", "bash", "-c",
+         "sleep 2 && python3 -m pip uninstall openry -y >/dev/null 2>&1"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _detect_shell_rc() -> Path:
+    """Detect the user's shell RC file path."""
+    from pathlib import Path
+    home = Path.home()
+    shell = os.environ.get("SHELL", "")
+    if "zsh" in shell:
+        return home / ".zshrc"
+    elif "bash" in shell:
+        return home / ".bashrc"
+    else:
+        return home / ".profile"
+
+
 def main() -> None:
     """Main entry point for the openry CLI.
 
@@ -865,10 +1036,48 @@ def main() -> None:
         run_server(serve_args.host, serve_args.port)
         return
 
+    # Route 'uninstall' subcommand
+    if len(sys.argv) > 1 and sys.argv[1] == "uninstall":
+        uninstall_parser = argparse.ArgumentParser(
+            prog="openry uninstall",
+            description="Uninstall OpenRY — remove data, clean config, optionally Full uninstall",
+        )
+        uninstall_parser.add_argument(
+            "--with-openclaw", action="store_true",
+            help="Also stop OpenClaw gateway, unregister plugin, remove agent config",
+        )
+        uninstall_parser.add_argument(
+            "--force", "-f", action="store_true",
+            help="Skip confirmation prompts",
+        )
+        uninstall_parser.add_argument(
+            "--keep-data", action="store_true",
+            help="Keep ~/.openry data directory",
+        )
+        uninstall_parser.add_argument(
+            "--keep-env", action="store_true",
+            help="Keep shell environment variable config",
+        )
+        uninstall_args = uninstall_parser.parse_args(sys.argv[2:])
+        cmd_uninstall(uninstall_args)
+        return
+
     # Default mode: -c or --status (Phase 1/2 backward compatible)
     parser = argparse.ArgumentParser(
         prog="openry",
-        description="Command forwarder for ReAct Agent workflow systems",
+        description="Command forwarder and workflow guardrail for AI agents.",
+        epilog=(
+            "Subcommands:\n"
+            "  openry serve [--port PORT]     Start the web dashboard\n"
+            "  openry uninstall [OPTIONS]     Remove OpenRY data and configuration\n"
+            "\n"
+            "Examples:\n"
+            "  openry -c 'echo hello'\n"
+            "  openry --status completed --payload '{\"key\":\"value\"}'\n"
+            "  openry serve --port 8080\n"
+            "  openry uninstall --with-openclaw --force\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     group = parser.add_mutually_exclusive_group(required=True)
