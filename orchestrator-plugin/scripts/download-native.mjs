@@ -26,8 +26,7 @@ const ARCH = process.arch;
 const NODE_ABI = process.versions.modules;
 
 const MIRRORS = [
-  "",                              // direct GitHub first
-  "https://ghfast.top/",          // fallback mirror
+  "",  // direct GitHub
 ];
 
 // ── 原生模块定义 ─────────────────────────────────────────────────
