@@ -24,6 +24,25 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# ── Parse arguments ───────────────────────────────────────────────────
+SKIP_PYTHON=false
+SKIP_PLUGIN=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --skip-python)   SKIP_PYTHON=true ;;
+        --skip-plugin)   SKIP_PLUGIN=true ;;
+        --help|-h)
+            echo "Usage: bash install.sh [--skip-python] [--skip-plugin]"
+            echo ""
+            echo "Options:"
+            echo "  --skip-python   Skip Python detection and pip install"
+            echo "  --skip-plugin   Skip orchestrator-plugin (OpenClaw) installation"
+            exit 0
+            ;;
+    esac
+done
+
 echo ""
 echo -e "${GREEN}${BOLD}╔══════════════════════════════════════╗${NC}"
 echo -e "${GREEN}${BOLD}║       OpenRY — One-Click Installer  ║${NC}"
@@ -51,7 +70,7 @@ echo -e "  Detected OS: ${CYAN}$OS_NAME${NC}"
 
 # ── 2. Resolve paths ─────────────────────────────────────────────────────
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WRAPPER_BIN="${HOME}/.local/bin"
 OPENRY_HOME="${OPENRY_HOME:-$HOME/.openry}"
 
@@ -59,6 +78,11 @@ echo -e "  Install dir: ${CYAN}$SCRIPT_DIR${NC}"
 echo ""
 
 # ── 3. Python Detection ───────────────────────────────────────────────────
+
+if [ "$SKIP_PYTHON" = true ]; then
+    echo -e "  ${YELLOW}⚠ Skipping Python check (--skip-python)${NC}"
+    PYTHON="python3"
+else
 
 PYTHON=""
 for candidate in python3.12 python3.11 python3.10 python3.9 python3; do
@@ -80,13 +104,17 @@ fi
 PY_VER=$($PYTHON --version 2>&1)
 echo -e "  ${GREEN}✓${NC} Python: $PY_VER"
 
+fi  # SKIP_PYTHON
+
 # ── 4. pip Detection ──────────────────────────────────────────────────────
 
+if [ "$SKIP_PYTHON" != true ]; then
 if ! $PYTHON -m pip --version &>/dev/null; then
     echo -e "${RED}✗ pip not available for $PYTHON${NC}"
     echo "  macOS:  $PYTHON -m ensurepip --upgrade"
     echo "  Linux:  sudo apt install python3-pip"
     exit 1
+fi
 fi
 
 # ── 5. Install pyyaml dependency ──────────────────────────────────────────
@@ -157,43 +185,25 @@ else
     echo "    Restart your terminal or run: source $SHELL_RC"
 fi
 
-# ── 8. Initialize .openry/ ───────────────────────────────────────────────
+# ── 8. Initialize .openry/ from seed ──────────────────────────────────────
 
-mkdir -p "$OPENRY_HOME/workflows"
-mkdir -p "$OPENRY_HOME/compositions"
-mkdir -p "$OPENRY_HOME/prompts"
-mkdir -p "$OPENRY_HOME/prompt_blocks"
+SEED_DIR="${SCRIPT_DIR}/seed"
+if [ -d "$SEED_DIR" ]; then
+    cp -r "$SEED_DIR"/* "$OPENRY_HOME/" 2>/dev/null || true
+    WF_COUNT=$(ls "$OPENRY_HOME/workflows/"*.yaml 2>/dev/null | wc -l | tr -d ' ')
+    CP_COUNT=$(ls "$OPENRY_HOME/compositions/"*.yaml 2>/dev/null | wc -l | tr -d ' ')
+    PM_COUNT=$(ls "$OPENRY_HOME/prompts/"*.md 2>/dev/null | wc -l | tr -d ' ')
+    echo -e "  ${GREEN}✓${NC} Initialized ${CYAN}${OPENRY_HOME}${NC} from seed/"
+    echo "    workflows: ${WF_COUNT} files, compositions: ${CP_COUNT} files, prompts: ${PM_COUNT} files"
+else
+    # Fallback: create empty structure
+    mkdir -p "$OPENRY_HOME/workflows" "$OPENRY_HOME/compositions" "$OPENRY_HOME/prompts" "$OPENRY_HOME/prompt_blocks"
+    echo -e "  ${YELLOW}⚠ seed/ not found, created empty structure${NC}"
+fi
 
 # Clean stale DB from previous install (fresh start)
 rm -f "$OPENRY_HOME/openry.db" "$OPENRY_HOME/openry.db-wal" "$OPENRY_HOME/openry.db-shm" 2>/dev/null || true
-
-echo -e "  ${GREEN}✓${NC} Initialized ${CYAN}${OPENRY_HOME}${NC} (workflows/ + compositions/ + prompts/ + prompt_blocks/)"
 echo ""
-
-# ── 8.5. Copy example YAMLs ──────────────────────────────────────────────
-
-EXAMPLE_DIR="${SCRIPT_DIR}/example"
-if [ -d "$EXAMPLE_DIR" ]; then
-    echo -e "  Installing example workflows & compositions..."
-    if [ -d "$EXAMPLE_DIR/workflows" ]; then
-        cp -n "$EXAMPLE_DIR/workflows/"*.yaml "$OPENRY_HOME/workflows/" 2>/dev/null || true
-    fi
-    if [ -d "$EXAMPLE_DIR/compositions" ]; then
-        cp -n "$EXAMPLE_DIR/compositions/"*.yaml "$OPENRY_HOME/compositions/" 2>/dev/null || true
-    fi
-    echo -e "  ${GREEN}✓${NC} Example YAMLs copied to ${CYAN}${OPENRY_HOME}${NC}"
-    echo ""
-fi
-
-# ── 8.6. Copy prompts ────────────────────────────────────────────────────
-
-PROMPTS_DIR="${SCRIPT_DIR}/prompts"
-if [ -d "$PROMPTS_DIR" ]; then
-    echo -e "  Installing agent prompts..."
-    cp -n "$PROMPTS_DIR/"*.md "$OPENRY_HOME/prompts/" 2>/dev/null || true
-    echo -e "  ${GREEN}✓${NC} Prompts copied to ${CYAN}${OPENRY_HOME}/prompts/${NC} (knowql-agent-prompt.md, semantic-primitives.md, compositions-and-workflows-guide.md)"
-    echo ""
-fi
 
 # ── 9. Verify ────────────────────────────────────────────────────────────
 
@@ -209,6 +219,11 @@ fi
 echo ""
 
 # ── 10. orchestrator-plugin (conditional) ─────────────────────────────────
+
+if [ "$SKIP_PLUGIN" = true ]; then
+    echo -e "  ${YELLOW}⚠ Skipping orchestrator plugin (--skip-plugin)${NC}"
+    echo ""
+else
 
 PLUGIN_DIR="${SCRIPT_DIR}/orchestrator-plugin"
 if [ -d "$PLUGIN_DIR" ]; then
@@ -297,37 +312,10 @@ if [ -d "$PLUGIN_DIR" ]; then
         fi
 
         if $PLUGIN_OK; then
-            # Create agent workspace + AGENTS.md
+            # Agent workspace already seeded from seed/agent-workspace/
             AGENT_WS="${OPENRY_HOME}/agent-workspace"
-            mkdir -p "$AGENT_WS"
 
-            cat > "$AGENT_WS/AGENTS.md" << 'AGENTPROMPT'
-# OpenRY Worker Agent
-
-You are an AI agent executing sub-steps of an OpenRY workflow.
-You have exactly TWO tools available:
-
-## Tools
-
-### openry_run
-Execute shell commands. Call this for ALL shell operations.
-
-### openry_status
-Declare the sub-step is complete. Call this ONLY when the task is fully done.
-
-## Rules
-
-1. Read the task description carefully — it tells you what to do
-2. Use `openry_run` for every shell command you need to run
-3. When the ENTIRE task is complete, call `openry_status` ONCE:
-   - `status: "completed"` — task succeeded, include all required data in `payload`
-   - `status: "failed"` — task cannot be completed
-4. Do NOT use `openry_run` to call the `openry` CLI directly — that's what `openry_status` tool is for
-5. Do NOT ask for confirmation — just execute
-6. Keep responses brief
-AGENTPROMPT
-
-            echo -e "  ${GREEN}✓${NC} Plugin installed + workspace created"
+            echo -e "  ${GREEN}✓${NC} Plugin installed + workspace ready"
 
             # Register the agent in OpenClaw (idempotent — skips if exists)
             if openclaw agents add openry-worker --workspace "$AGENT_WS" --non-interactive --json >/dev/null 2>&1; then
@@ -395,6 +383,7 @@ with open('$OCL_CONFIG', 'w', encoding='utf-8') as f:
     fi
     echo ""
 fi
+fi  # SKIP_PLUGIN
 
 # ── 11. Done ──────────────────────────────────────────────────────────────
 

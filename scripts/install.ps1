@@ -44,7 +44,7 @@ Write-Host ""
 
 # ── Resolve paths ──────────────────────────────────────────────────────
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $OpenryHome = if ($env:OPENRY_HOME) { $env:OPENRY_HOME } else { "$env:USERPROFILE\.openry" }
 
 Write-Info "Install dir: $ScriptDir"
@@ -282,13 +282,22 @@ if ($currentOpenryHome -ne $OpenryHome) {
 Write-Host ""
 
 # ═══════════════════════════════════════════════════════════════════════
-# 6. Initialize .openry directory structure
+# 6. Initialize .openry from seed directory
 # ═══════════════════════════════════════════════════════════════════════
 
-New-Item -ItemType Directory -Force -Path "$OpenryHome\workflows"      | Out-Null
-New-Item -ItemType Directory -Force -Path "$OpenryHome\compositions"   | Out-Null
-New-Item -ItemType Directory -Force -Path "$OpenryHome\prompts"        | Out-Null
-New-Item -ItemType Directory -Force -Path "$OpenryHome\prompt_blocks"  | Out-Null
+$seedDir = Join-Path $ScriptDir "seed"
+if (Test-Path $seedDir) {
+    Copy-Item "$seedDir\*" -Destination "$OpenryHome\" -Recurse -Force -ErrorAction SilentlyContinue
+    $wfCount = (Get-ChildItem "$OpenryHome\workflows\*.yaml" -ErrorAction SilentlyContinue).Count
+    $cpCount = (Get-ChildItem "$OpenryHome\compositions\*.yaml" -ErrorAction SilentlyContinue).Count
+    $pmCount = (Get-ChildItem "$OpenryHome\prompts\*.md" -ErrorAction SilentlyContinue).Count
+    Write-OK "Initialized $OpenryHome from seed/"
+    Write-Host "    workflows: $wfCount files, compositions: $cpCount files, prompts: $pmCount files"
+} else {
+    # Fallback: create empty structure
+    New-Item -ItemType Directory -Force -Path "$OpenryHome\workflows","$OpenryHome\compositions","$OpenryHome\prompts","$OpenryHome\prompt_blocks" | Out-Null
+    Write-Warn "seed/ not found, created empty structure"
+}
 
 # Clean stale DB from previous install (fresh start)
 $dbFiles = @("openry.db", "openry.db-wal", "openry.db-shm")
@@ -297,33 +306,6 @@ foreach ($f in $dbFiles) {
     if (Test-Path $fp) {
         try { Remove-Item -Force $fp -ErrorAction SilentlyContinue } catch {}
     }
-}
-Write-OK "Initialized $OpenryHome (workflows/ + compositions/ + prompts/ + prompt_blocks/)"
-Write-Host ""
-
-# ═══════════════════════════════════════════════════════════════════════
-# 7. Copy example YAMLs & prompts
-# ═══════════════════════════════════════════════════════════════════════
-
-$exampleDir = Join-Path $ScriptDir "example"
-if (Test-Path $exampleDir) {
-    Write-Host "  Installing example workflows & compositions..."
-    $exampleWorkflows = Join-Path $exampleDir "workflows"
-    if (Test-Path $exampleWorkflows) {
-        Copy-Item "$exampleWorkflows\*.yaml" -Destination "$OpenryHome\workflows\" -Exclude *system* -ErrorAction SilentlyContinue
-    }
-    $exampleCompositions = Join-Path $exampleDir "compositions"
-    if (Test-Path $exampleCompositions) {
-        Copy-Item "$exampleCompositions\*.yaml" -Destination "$OpenryHome\compositions\" -ErrorAction SilentlyContinue
-    }
-    Write-OK "Example YAMLs copied"
-}
-
-$promptsDir = Join-Path $ScriptDir "prompts"
-if (Test-Path $promptsDir) {
-    Write-Host "  Installing agent prompts..."
-    Copy-Item "$promptsDir\*.md" -Destination "$OpenryHome\prompts\" -ErrorAction SilentlyContinue
-    Write-OK "Prompts copied"
 }
 Write-Host ""
 
@@ -461,36 +443,8 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
                 openclaw plugins install . --link 2>&1 | Out-Null
                 Write-OK "Plugin installed"
 
-                # ── Create agent workspace + register openry-worker agent ──
+                # ── Agent workspace already seeded from seed/agent-workspace/ ──
                 $agentWs = Join-Path $OpenryHome "agent-workspace"
-                New-Item -ItemType Directory -Force -Path $agentWs | Out-Null
-
-                # Write AGENTS.md for the worker agent
-                @"
-# OpenRY Worker Agent
-
-You are an AI agent executing sub-steps of an OpenRY workflow.
-You have exactly TWO tools available:
-
-## Tools
-
-### openry_run
-Execute shell commands. Call this for ALL shell operations.
-
-### openry_status
-Declare the sub-step is complete. Call this ONLY when the task is fully done.
-
-## Rules
-
-1. Read the task description carefully — it tells you what to do
-2. Use `openry_run` for every shell command you need to run
-3. When the ENTIRE task is complete, call `openry_status` ONCE:
-   - `status: "completed"` — task succeeded, include all required data in `payload`
-   - `status: "failed"` — task cannot be completed
-4. Do NOT use `openry_run` to call the `openry` CLI directly — that's what `openry_status` tool is for
-5. Do NOT ask for confirmation — just execute
-6. Keep responses brief
-"@ | Out-File -FilePath (Join-Path $agentWs "AGENTS.md") -Encoding UTF8
 
                 # Register the agent in OpenClaw (idempotent — skips if exists)
                 try {

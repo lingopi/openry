@@ -54,7 +54,7 @@ echo ""
 
 # ── Resolve paths ──────────────────────────────────────────────────────
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 OPENRY_HOME="${OPENRY_HOME:-$HOME/.openry}"
 PLUGIN_DIR="${SCRIPT_DIR}/orchestrator-plugin"
 HF_CACHE="$HOME/.cache/huggingface"

@@ -242,10 +242,45 @@ sub_steps:
 
 ### 5.6 命令策略字段
 
+`command_policy` 支持三种值形式：
+
+**① 内置预设名（字符串）**：
+```yaml
+command_policy: strict       # 或 moderate、permissive
+```
+三个内置预设（strict / moderate / permissive）无需额外文件，直接可用。
+
+**② 自定义策略文件名（字符串）**：
+```yaml
+command_policy: office_safe
+```
+从 `~/.openry/policies/office_safe.yaml` 加载自定义策略。策略文件与内置预设格式相同：
+```yaml
+# ~/.openry/policies/office_safe.yaml
+mode: blocklist
+commands:
+  - rm
+  - sudo
+  - shutdown
+patterns:
+  - regex: "^curl\\s+.*evil\\.com"
+    description: "禁止访问恶意域名"
+```
+安装时 `seed/policies/` 中的模板文件会自动复制到 `~/.openry/policies/`。
+
+**③ 内联对象**：
+```yaml
+command_policy:
+  mode: blocklist
+  commands: ["rm", "sudo", "chmod", "kill"]
+```
+
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|:--:|--------|------|
-| `command_policy.mode` | string | 否 | `unrestricted` | `unrestricted`：不限制；`allowlist`：只允许列表中的命令；`blocklist`：禁止列表中的命令 |
+| `command_policy` | string/object | 否 | — | 预设名、自定义策略文件名、或内联策略对象 |
+| `command_policy.mode` | string | 是* | `unrestricted` | 内联模式才需要。`unrestricted`：不限制；`allowlist`：只允许列表中的命令；`blocklist`：禁止列表中的命令 |
 | `command_policy.commands` | list[string] | 否 | `[]` | 命令名列表（取命令字符串的第一个空格前 token 匹配） |
+| `command_policy.patterns` | list[object] | 否 | `[]` | 正则表达式列表，每条含 `regex`（正则）和 `description`（说明） |
 
 ### 5.7 语义蒸馏字段（Phase D）
 
@@ -602,7 +637,7 @@ KnowQL 是 agent 在运行时主动查询历史 payload 数据的知识图谱查
 | `inherit_payload` | Prompt 构建时（push） | 直接上游 step 的 payload | 自动将上一步产出注入当前 agent 的 prompt |
 | KnowQL | Agent 运行时（pull） | 任意历史 step（跨 big_step、跨 composition） | Agent 按需主动探索超出直接上游范围的数据 |
 
-**API 设计**：两种操作——`discover`（探索）和 `query`（精确查询）。扁平化参数，无 key 投影，全量返回 payload。详细指南见 `prompts/knowql-agent-prompt.md`。
+**API 设计**：两种操作——`discover`（探索）和 `query`（精确查询）。扁平化参数，无 key 投影，全量返回 payload。详细指南见 `prompts/openry-payload-query-enhance.md`。
 
 ### 8.2 配置字段
 

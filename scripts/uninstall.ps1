@@ -36,7 +36,7 @@ Write-Host "╚═════════════════════�
 if ($All) { Write-Host "  Mode: COMPLETE (DB + models + deps)" -ForegroundColor Red }
 Write-Host ""
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $OpenryHome = if ($env:OPENRY_HOME) { $env:OPENRY_HOME } else { "$env:USERPROFILE\.openry" }
 $PluginDir = Join-Path $ScriptDir "orchestrator-plugin"
 $HfCache = "$env:USERPROFILE\.cache\huggingface"

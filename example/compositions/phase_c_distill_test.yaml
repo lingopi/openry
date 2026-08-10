@@ -1,7 +1,0 @@
-name: phase_c_distill_test
-version: "1.0"
-description: "Phase C 蒸馏测试：shell 产出 → 蒸馏 → 下游消费"
-
-big_steps:
-  - ref: phase_c_distill_test
-    description: "shell 拉取 session.json → 蒸馏 workflow 处理 → agent 消费蒸馏结果"

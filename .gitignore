@@ -8,16 +8,24 @@ venv/
 .env
 .openry/
 *.db
+.DS_Store
+
+# Dev-only — not shipped to users
 design/
 docs/
+example/
 recode.md
 session执行过程.md
-openclaw-latest/
-.DS_Store
-# deps/ large files are now managed by Git LFS
 
-# Release assets — published to GitHub Releases, not in git
+# Reference copy of OpenClaw
+openclaw-latest/
+
+# Source copies — now live in seed/ (the single source of truth)
+/prompts/
+/policies/
+bundle-openry.sh
+
+# Dependencies & release assets — published to GitHub Releases, not in git
+deps/
 bge-m3-offline.tar.gz
 orchestrator-plugin-bundle.tar.gz
-deps/
-prompts/test-prompt-blocks.yaml

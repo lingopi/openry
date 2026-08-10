@@ -1,4 +1,0 @@
-name: knowql_knowledge_query_test
-description: "Phase D: 测试 openry_knowledge_query 语义检索"
-big_steps:
-  - ref: knowql_knowledge_query_test

@@ -41,7 +41,7 @@ import { normalizeConcepts } from "../knowql-knowledge/index.js";
 // Injected into opening message when sub_step.allow_payload_query is true.
 // Read from external .md file for easy updates without recompilation.
 
-const KNOWQL_GUIDE_PATH = path.join(os.homedir(), ".openry", "prompts", "knowql-agent-prompt.md");
+const KNOWQL_GUIDE_PATH = path.join(os.homedir(), ".openry", "prompts", "openry-payload-query-enhance.md");
 
 function loadKnowQLGuide(): string {
   try {

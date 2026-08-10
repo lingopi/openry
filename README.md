@@ -45,14 +45,14 @@ OpenRY 在 AI Agent 和系统命令之间插入一个可控的**中间层**。Ag
 # macOS / Linux
 git clone https://github.com/lingopi/openry.git
 cd openry
-./install.sh
+bash scripts/install.sh
 ```
 
 ```powershell
 # Windows (PowerShell 7+)
 git clone https://github.com/lingopi/openry.git
 cd openry
-pwsh -File install.ps1
+pwsh -File scripts/install.ps1
 ```
 
 安装脚本自动完成：pip 安装 → npm 依赖 → 插件注册 → Agent 配置 → BGE-M3 向量模型。
@@ -70,6 +70,24 @@ deps/
 └── windows/
     └── orchestrator-plugin-bundle.tar.gz  # Windows 插件完整依赖
 ```
+
+### 卸载
+
+```bash
+# 保留用户数据（DB + 工作流 + 模型缓存）
+bash scripts/uninstall.sh
+
+# 彻底清除一切（含 DB + 工作流 + AI 模型缓存）
+bash scripts/uninstall.sh --force --all
+```
+
+| 选项 | 说明 |
+|------|------|
+| `--force` | 跳过确认提示 |
+| `--all` | 删除 `~/.openry` 数据目录 + HuggingFace 模型缓存 |
+| `--keep-data` | 保留 `~/.openry`（默认行为） |
+| `--keep-env` | 保留 shell 环境变量配置 |
+| `--skip-gateway` | 不停止 OpenClaw Gateway |
 
 ### 启动
 
@@ -168,8 +186,8 @@ OpenRY is a cross-platform command guardrail for AI agents. It sits between the 
 # Install
 git clone https://github.com/lingopi/openry.git
 cd openry
-./install.sh           # macOS / Linux
-# pwsh -File install.ps1   # Windows
+bash scripts/install.sh           # macOS / Linux
+# pwsh -File scripts/install.ps1   # Windows
 
 # Start
 openclaw gateway restart
@@ -177,6 +195,24 @@ openry serve            # → http://127.0.0.1:9100
 ```
 
 For offline install, place pre-built dependency tarballs in `deps/{common,macos,windows}/` — the installer prefers local files with zero network dependency.
+
+### Uninstall
+
+```bash
+# Keep user data (DB + workflows + model cache)
+bash scripts/uninstall.sh
+
+# Complete removal (DB + workflows + AI model cache)
+bash scripts/uninstall.sh --force --all
+```
+
+| Option | Description |
+|--------|-------------|
+| `--force` | Skip confirmation prompts |
+| `--all` | Remove `~/.openry` data dir + HuggingFace model cache |
+| `--keep-data` | Keep `~/.openry` (default behavior) |
+| `--keep-env` | Keep shell environment variable config |
+| `--skip-gateway` | Don't stop OpenClaw Gateway |
 
 ### Architecture
 
