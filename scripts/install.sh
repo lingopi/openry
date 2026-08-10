@@ -250,7 +250,7 @@ if [ -d "$PLUGIN_DIR" ]; then
         cd "$PLUGIN_DIR"
 
         # ── Fast path: use pre-built bundle if available ──
-        BUNDLE_FILE="orchestrator-plugin-bundle.tar.gz"
+        BUNDLE_FILE="orchestrator-plugin-bundle-macos.tar.gz"
         BUNDLE_LOCAL="${SCRIPT_DIR}/deps/macos/${BUNDLE_FILE}"
         BUNDLE_VERSION="plugin-bundle-v1.0"
         USE_BUNDLE=false

@@ -361,7 +361,7 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
         Push-Location $pluginDir
 
         # ── Fast path: use pre-built bundle if available ──
-        $bundleFile = "orchestrator-plugin-bundle.tar.gz"
+        $bundleFile = "orchestrator-plugin-bundle-win.tar.gz"
         $bundleLocal = Join-Path $ScriptDir "deps\windows\$bundleFile"
         $bundleVersion = "plugin-bundle-v1.0"
         $useBundle = $false
