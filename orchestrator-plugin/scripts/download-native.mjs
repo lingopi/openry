@@ -23,6 +23,8 @@ const pluginDir = join(__dirname, "..");
 
 const PLATFORM = process.platform;
 const ARCH = process.arch;
+// sharp-libvips uses "arm64v8" on macOS ARM, not "arm64"
+const LIBVIPS_ARCH = PLATFORM === "darwin" && ARCH === "arm64" ? "arm64v8" : ARCH;
 const NODE_ABI = process.versions.modules;
 
 const MIRRORS = [
@@ -51,7 +53,7 @@ const nativeModules = [
     libvips: {
       repo: "lovell/sharp-libvips",
       version: "8.14.5",
-      fileName: `libvips-8.14.5-${PLATFORM}-${ARCH}.tar.br`,
+      fileName: `libvips-8.14.5-${PLATFORM}-${LIBVIPS_ARCH}.tar.br`,
       isBrotli: true,
     },
   },
