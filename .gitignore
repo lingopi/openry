@@ -20,3 +20,4 @@ openclaw-latest/
 bge-m3-offline.tar.gz
 orchestrator-plugin-bundle.tar.gz
 deps/
+prompts/test-prompt-blocks.yaml
