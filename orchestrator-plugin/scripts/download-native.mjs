@@ -26,11 +26,8 @@ const ARCH = process.arch;
 const NODE_ABI = process.versions.modules;
 
 const MIRRORS = [
-  "https://ghfast.top/",
-  "https://ghproxy.com/",
-  "https://mirror.ghproxy.com/",
-  "https://github.moeyy.xyz/",
-  "https://gh.con.sh/",
+  "",                              // direct GitHub first
+  "https://ghfast.top/",          // fallback mirror
 ];
 
 // ── 原生模块定义 ─────────────────────────────────────────────────
@@ -156,7 +153,8 @@ async function downloadLibvips(mod, targetDir, tmpDir) {
   for (const mirror of MIRRORS) {
     try {
       const lvUrl = mirror + lvBase;
-      console.log(`  libvips trying ${new URL(mirror).hostname} ...`);
+      const label = mirror ? new URL(mirror).hostname : "github.com";
+      console.log(`  libvips trying ${label} ...`);
       if (lv.isBrotli) {
         await downloadFile(lvUrl, lvTarPath);
         const { brotliDecompressSync } = await import("node:zlib");
@@ -211,7 +209,8 @@ async function handleModule(mod) {
   for (const mirror of MIRRORS) {
     try {
       const url = mirror + base;
-      console.log(`  trying ${new URL(mirror).hostname} ...`);
+      const label = mirror ? new URL(mirror).hostname : "github.com";
+      console.log(`  trying ${label} ...`);
       await downloadFile(url, tarPath);
       const extractDir = join(tmpDir, `ext-${mod.name}`);
       extractTarGz(tarPath, extractDir);
@@ -243,7 +242,8 @@ async function handleModule(mod) {
         for (const mirror of MIRRORS) {
           try {
             const lvUrl = mirror + lvBase;
-            console.log(`  libvips trying ${new URL(mirror).hostname} ...`);
+            const label = mirror ? new URL(mirror).hostname : "github.com";
+            console.log(`  libvips trying ${label} ...`);
             if (lv.isBrotli) {
               // .tar.br → decompress brotli → untar
               await downloadFile(lvUrl, lvTarPath);
