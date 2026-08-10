@@ -356,9 +356,15 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
         Write-Host "  Re-run this installer after installing the missing dependencies."
     } else {
         Write-OK "OpenClaw + Node.js detected, installing plugin..."
-        $pluginOk = $true
 
         Push-Location $pluginDir
+
+        # Skip if already installed
+        if ((Test-Path (Join-Path $pluginDir "node_modules")) -and (Test-Path (Join-Path $pluginDir "dist\index.js"))) {
+            Write-Host "  Plugin already installed, skip" -ForegroundColor Cyan
+            $pluginOk = $true
+        } else {
+            $pluginOk = $true
 
         # ── Fast path: use pre-built bundle if available ──
         $bundleFile = "orchestrator-plugin-bundle-win.tar.gz"
@@ -507,6 +513,10 @@ with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f
                 }
 
                 # ── Install BGE-M3 model (local file or GitHub Release) ──
+                $bgeCacheDir = Join-Path $pluginDir "node_modules\@xenova\transformers\.cache\Xenova\bge-m3"
+                if (Test-Path $bgeCacheDir) {
+                    Write-Host "  BGE-M3 model already installed, skip" -ForegroundColor Cyan
+                } else {
                 Write-Host "  Installing BGE-M3 embedding model (one-time, ~400MB)..."
                 $bgeVersion = "bge-m3-v1.0"
                 $bgeFile = "bge-m3-offline.tar.gz"
@@ -556,12 +566,14 @@ with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f
                     }
                     Remove-Item -Recurse -Force $bgeExtract -ErrorAction SilentlyContinue
                 }
+            }  # BGE-M3 already installed check
             } catch {
                 Write-Warn "openclaw plugins install failed"
                 Write-Host "    Try: cd $pluginDir; openclaw plugins install . --link"
             }
         }
         Pop-Location
+        }  # plugin already installed check
     }
     Write-Host ""
 }

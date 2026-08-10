@@ -245,9 +245,22 @@ if [ -d "$PLUGIN_DIR" ]; then
         echo "  Re-run this installer after installing the missing dependencies."
     else
         echo -e "  ${GREEN}✓${NC} OpenClaw + Node.js detected, installing plugin..."
-        PLUGIN_OK=true
 
         cd "$PLUGIN_DIR"
+
+        # Skip if already installed (node_modules + dist exist)
+        if [ -d "$PLUGIN_DIR/node_modules" ] && [ -f "$PLUGIN_DIR/dist/index.js" ]; then
+            echo -e "  ${CYAN}Plugin already installed, skip${NC}"
+            PLUGIN_OK=true
+            # Still need to register with openclaw if config was wiped
+            if openclaw plugins list 2>/dev/null | grep -q orchestrator-plugin; then
+                echo -e "  ${CYAN}Plugin already registered, skip${NC}"
+            else
+                echo -e "  Re-registering plugin..."
+                openclaw plugins install . --link 2>/dev/null || true
+            fi
+        else
+            PLUGIN_OK=true
 
         # ── Fast path: use pre-built bundle if available ──
         BUNDLE_FILE="orchestrator-plugin-bundle-macos.tar.gz"
@@ -369,6 +382,14 @@ with open('$OCL_CONFIG', 'w', encoding='utf-8') as f:
             fi
 
             # ── Install BGE-M3 model (local file or GitHub Release) ──
+            BGE_INSTALLED=false
+            BGE_CACHE_DIR="$PLUGIN_DIR/node_modules/@xenova/transformers/.cache/Xenova/bge-m3"
+            if [ -d "$BGE_CACHE_DIR" ]; then
+                echo -e "  ${CYAN}BGE-M3 model already installed, skip${NC}"
+                BGE_INSTALLED=true
+            fi
+
+            if [ "$BGE_INSTALLED" != true ]; then
             echo -e "  Installing BGE-M3 embedding model (one-time, ~400MB)..."
             BGE_VER="bge-m3-v1.0"
             BGE_FILE="bge-m3-offline.tar.gz"
@@ -407,6 +428,7 @@ with open('$OCL_CONFIG', 'w', encoding='utf-8') as f:
             else
                 echo -e "  ${YELLOW}⚠${NC} BGE-M3 download failed (will download on first use)"
             fi
+            fi  # BGE_INSTALLED
             echo ""
             echo -e "  Restart gateway: ${CYAN}openclaw gateway restart${NC}"
         fi
@@ -415,6 +437,7 @@ with open('$OCL_CONFIG', 'w', encoding='utf-8') as f:
     fi
     echo ""
 fi
+fi  # plugin already installed check
 fi  # SKIP_PLUGIN
 
 # ── 11. Done ──────────────────────────────────────────────────────────────
