@@ -259,7 +259,7 @@ if [ -d "$PLUGIN_DIR" ]; then
             USE_BUNDLE=true
         else
             # Try download from GitHub Release mirror
-            BUNDLE_URL="https://ghfast.top/https://github.com/lingopi/openry/releases/download/${BUNDLE_VERSION}/${BUNDLE_FILE}"
+            BUNDLE_URL="https://github.com/lingopi/openry/releases/download/${BUNDLE_VERSION}/${BUNDLE_FILE}"
             BUNDLE_TMP="/tmp/${BUNDLE_FILE}"
             if curl -fsSL --connect-timeout 30 --max-time 300 -o "$BUNDLE_TMP" "$BUNDLE_URL" 2>/dev/null && [ -f "$BUNDLE_TMP" ]; then
                 USE_BUNDLE=true
@@ -359,7 +359,7 @@ with open('$OCL_CONFIG', 'w', encoding='utf-8') as f:
                 echo -e "    Using local file: ${BGE_LOCAL}"
                 cp "$BGE_LOCAL" "$BGE_TMP" && BGE_OK=true
             else
-                BGE_URL="https://ghfast.top/https://github.com/lingopi/openry/releases/download/${BGE_VER}/${BGE_FILE}"
+                BGE_URL="https://github.com/lingopi/openry/releases/download/${BGE_VER}/${BGE_FILE}"
                 echo -e "    Downloading from: ${BGE_URL}"
                 curl -fsSL --connect-timeout 30 -o "$BGE_TMP" "$BGE_URL" && BGE_OK=true
             fi

@@ -371,7 +371,7 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
             $useBundle = $true
         } else {
             # Try download from GitHub Release mirror
-            $bundleUrl = "https://ghfast.top/https://github.com/lingopi/openry/releases/download/$bundleVersion/$bundleFile"
+            $bundleUrl = "https://github.com/lingopi/openry/releases/download/$bundleVersion/$bundleFile"
             $bundleTmp = "$env:TEMP\$bundleFile"
             try {
                 Write-Host "    Downloading plugin bundle..."
@@ -493,7 +493,7 @@ with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f
                         $sourceFile = $bgeLocal
                         $localMode = $true
                     } else {
-                        $bgeUrl = "https://ghfast.top/https://github.com/lingopi/openry/releases/download/$bgeVersion/$bgeFile"
+                        $bgeUrl = "https://github.com/lingopi/openry/releases/download/$bgeVersion/$bgeFile"
                         Write-Host "    Downloading from: $bgeUrl"
                         curl -L -o $bgeTmp $bgeUrl --connect-timeout 30 --max-time 600 2>&1 | Out-Null
                         if ($LASTEXITCODE -ne 0) { throw "curl exit code $LASTEXITCODE" }
