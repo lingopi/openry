@@ -259,16 +259,21 @@ if [ -d "$PLUGIN_DIR" ]; then
             echo -e "    Using local plugin bundle: ${BUNDLE_LOCAL}"
             USE_BUNDLE=true
         else
-            # Try download from GitHub Release mirror
-            BUNDLE_URL="https://github.com/lingopi/openry/releases/download/${BUNDLE_VERSION}/${BUNDLE_FILE}"
-            BUNDLE_TMP="/tmp/${BUNDLE_FILE}"
-            if curl -fsSL --connect-timeout 30 --max-time 300 -o "$BUNDLE_TMP" "$BUNDLE_URL" 2>/dev/null && [ -f "$BUNDLE_TMP" ]; then
-                USE_BUNDLE=true
-                BUNDLE_LOCAL="$BUNDLE_TMP"
-                # Save to deps/ for future reinstalls
-                mkdir -p "${SCRIPT_DIR}/deps/macos"
-                cp "$BUNDLE_TMP" "${SCRIPT_DIR}/deps/macos/${BUNDLE_FILE}" 2>/dev/null || true
-            fi
+            # Try Gitee first, GitHub as fallback
+            BUNDLE_URLS=(
+                "https://gitee.com/openry/openry/releases/download/${BUNDLE_VERSION}/${BUNDLE_FILE}"
+                "https://github.com/lingopi/openry/releases/download/${BUNDLE_VERSION}/${BUNDLE_FILE}"
+            )
+            for BUNDLE_URL in "${BUNDLE_URLS[@]}"; do
+                BUNDLE_TMP="/tmp/${BUNDLE_FILE}"
+                if curl -fsSL --connect-timeout 30 --max-time 300 -o "$BUNDLE_TMP" "$BUNDLE_URL" 2>/dev/null && [ -f "$BUNDLE_TMP" ]; then
+                    USE_BUNDLE=true
+                    BUNDLE_LOCAL="$BUNDLE_TMP"
+                    mkdir -p "${SCRIPT_DIR}/deps/macos"
+                    cp "$BUNDLE_TMP" "${SCRIPT_DIR}/deps/macos/${BUNDLE_FILE}" 2>/dev/null || true
+                    break
+                fi
+            done
         fi
 
         if [ "$USE_BUNDLE" = true ]; then
@@ -360,9 +365,18 @@ with open('$OCL_CONFIG', 'w', encoding='utf-8') as f:
                 echo -e "    Using local file: ${BGE_LOCAL}"
                 cp "$BGE_LOCAL" "$BGE_TMP" && BGE_OK=true
             else
-                BGE_URL="https://github.com/lingopi/openry/releases/download/${BGE_VER}/${BGE_FILE}"
-                echo -e "    Downloading from: ${BGE_URL}"
-                curl -fsSL --connect-timeout 30 -o "$BGE_TMP" "$BGE_URL" && BGE_OK=true
+                # Try Gitee first, GitHub as fallback
+                BGE_URLS=(
+                    "https://gitee.com/openry/openry/releases/download/${BGE_VER}/${BGE_FILE}"
+                    "https://github.com/lingopi/openry/releases/download/${BGE_VER}/${BGE_FILE}"
+                )
+                for BGE_URL in "${BGE_URLS[@]}"; do
+                    echo -e "    Downloading from: ${BGE_URL}"
+                    if curl -fsSL --connect-timeout 30 -o "$BGE_TMP" "$BGE_URL"; then
+                        BGE_OK=true
+                        break
+                    fi
+                done
             fi
 
             if [ "$BGE_OK" = true ]; then

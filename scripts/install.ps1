@@ -370,17 +370,23 @@ if ((Test-Path $pluginDir) -and (-not $SkipPlugin)) {
             Write-Host "    Using local plugin bundle: $bundleLocal"
             $useBundle = $true
         } else {
-            # Try download from GitHub Release mirror
-            $bundleUrl = "https://github.com/lingopi/openry/releases/download/$bundleVersion/$bundleFile"
-            $bundleTmp = "$env:TEMP\$bundleFile"
-            try {
-                Write-Host "    Downloading plugin bundle..."
-                curl -L -o $bundleTmp $bundleUrl --connect-timeout 30 --max-time 300 2>&1 | Out-Null
-                if ($LASTEXITCODE -eq 0 -and (Test-Path $bundleTmp)) {
-                    $useBundle = $true
-                    $bundleLocal = $bundleTmp
-                }
-            } catch { }
+            # Try Gitee first, GitHub as fallback
+            $bundleUrls = @(
+                "https://gitee.com/openry/openry/releases/download/$bundleVersion/$bundleFile",
+                "https://github.com/lingopi/openry/releases/download/$bundleVersion/$bundleFile"
+            )
+            foreach ($bundleUrl in $bundleUrls) {
+                $bundleTmp = "$env:TEMP\$bundleFile"
+                try {
+                    Write-Host "    Downloading plugin bundle from: $bundleUrl"
+                    curl -L -o $bundleTmp $bundleUrl --connect-timeout 30 --max-time 300 2>&1 | Out-Null
+                    if ($LASTEXITCODE -eq 0 -and (Test-Path $bundleTmp)) {
+                        $useBundle = $true
+                        $bundleLocal = $bundleTmp
+                        break
+                    }
+                } catch { }
+            }
 
             # Save to deps/windows/ for future reinstalls
             if ($useBundle) {
@@ -493,10 +499,16 @@ with open(r'$env:USERPROFILE\.openclaw\openclaw.json','w',encoding='utf-8') as f
                         $sourceFile = $bgeLocal
                         $localMode = $true
                     } else {
-                        $bgeUrl = "https://github.com/lingopi/openry/releases/download/$bgeVersion/$bgeFile"
-                        Write-Host "    Downloading from: $bgeUrl"
-                        curl -L -o $bgeTmp $bgeUrl --connect-timeout 30 --max-time 600 2>&1 | Out-Null
-                        if ($LASTEXITCODE -ne 0) { throw "curl exit code $LASTEXITCODE" }
+                        $bgeUrls = @(
+                            "https://gitee.com/openry/openry/releases/download/$bgeVersion/$bgeFile",
+                            "https://github.com/lingopi/openry/releases/download/$bgeVersion/$bgeFile"
+                        )
+                        foreach ($bgeUrl in $bgeUrls) {
+                            Write-Host "    Downloading from: $bgeUrl"
+                            curl -L -o $bgeTmp $bgeUrl --connect-timeout 30 --max-time 600 2>&1 | Out-Null
+                            if ($LASTEXITCODE -eq 0) { break }
+                        }
+                        if ($LASTEXITCODE -ne 0) { throw "download failed" }
                         $sourceFile = $bgeTmp
                         $localMode = $false
                     }
