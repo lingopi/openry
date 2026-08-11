@@ -866,8 +866,26 @@ def _kill_openry_processes() -> None:
     """Kill openry processes that may hold DB lock."""
     try:
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/F", "/IM", "python.exe"],
-                           capture_output=True, timeout=5)
+            # Only kill python.exe processes whose command line mentions openry.
+            # Write a temp .ps1 to avoid shell-quoting nightmares.
+            import tempfile as _tf, os as _os
+            _script = (
+                '$procs = Get-CimInstance Win32_Process -Filter "Name=\'python.exe\'" |'
+                ' Where-Object { $_.CommandLine -match \'openry\' };'
+                ' foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }'
+            )
+            _fd, _path = _tf.mkstemp(suffix=".ps1", prefix="openry-kill-")
+            try:
+                _os.write(_fd, _script.encode("utf-8"))
+                _os.close(_fd)
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-File", _path],
+                    capture_output=True, timeout=15)
+            finally:
+                try:
+                    _os.unlink(_path)
+                except OSError:
+                    pass
         else:
             subprocess.run(["pkill", "-f", "openry"],
                            capture_output=True, timeout=5)
@@ -878,13 +896,16 @@ def _kill_openry_processes() -> None:
 def _clean_shell_config(home: Path) -> None:
     """Remove OpenRY entries from shell config."""
     if sys.platform == "win32":
-        # Windows: remove OPENRY_HOME user environment variable
+        # Windows: delete OPENRY_HOME user environment variable (not set to empty)
         try:
             import subprocess as _sp
-            _sp.run(["setx", "OPENRY_HOME", ""], capture_output=True, timeout=5)
-            print("  ✓ OPENRY_HOME env var cleared")
+            _sp.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "[Environment]::SetEnvironmentVariable('OPENRY_HOME', $null, 'User')"],
+                capture_output=True, timeout=10)
+            print("  ✓ OPENRY_HOME env var deleted")
         except Exception as e:
-            print(f"  ⚠ Could not clear OPENRY_HOME: {e}")
+            print(f"  ⚠ Could not delete OPENRY_HOME: {e}")
         return
 
     # Unix: clean .zshrc / .bashrc / .profile
@@ -1196,7 +1217,14 @@ def cmd_tools_sync(args: argparse.Namespace) -> None:
         if args.restart:
             print("  Restarting OpenClaw gateway...")
             try:
-                subprocess.run(["openclaw", "gateway", "restart"], check=False)
+                # Resolve openclaw path on Windows (subprocess doesn't auto-resolve .CMD/.ps1)
+                _ocl = "openclaw"
+                if sys.platform == "win32":
+                    import shutil as _shutil
+                    _resolved = _shutil.which("openclaw")
+                    if _resolved:
+                        _ocl = _resolved
+                subprocess.run([_ocl, "gateway", "restart"], check=False)
             except FileNotFoundError:
                 print("  ⚠ openclaw not found")
             except Exception as e:

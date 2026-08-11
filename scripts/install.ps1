@@ -149,6 +149,11 @@ function Resolve-Asset {
             }
             Write-Err "sha256 mismatch on GitCode-fetched file"
         }
+    }
+
+    # All sources failed
+    return $null
+}
 
 # Check if BGE-M3 cache is complete (file-level verification)
 function Test-BGEM3Complete {
@@ -242,14 +247,20 @@ if (-not $SkipPython) {
 
     # ── Step 3: Check Windows Registry ──
     if (-not $pythonCmd) {
-        $regPaths = @(
-            "HKLM:\SOFTWARE\Python\PythonCore\*\InstallPath",
-            "HKCU:\SOFTWARE\Python\PythonCore\*\InstallPath"
+        $regBasePaths = @(
+            "HKLM:\SOFTWARE\Python\PythonCore",
+            "HKCU:\SOFTWARE\Python\PythonCore"
         )
         $regVersions = @()
-        foreach ($rp in $regPaths) {
-            $items = Get-ItemProperty -Path $rp -ErrorAction SilentlyContinue
-            if ($items) { $regVersions += $items }
+        foreach ($base in $regBasePaths) {
+            $versionKeys = Get-ChildItem -Path $base -ErrorAction SilentlyContinue
+            if ($versionKeys) {
+                foreach ($vk in $versionKeys) {
+                    $installKey = Join-Path $vk.PSPath "InstallPath"
+                    $props = Get-ItemProperty -Path $installKey -ErrorAction SilentlyContinue
+                    if ($props) { $regVersions += $props }
+                }
+            }
         }
         if ($regVersions.Count -gt 0) {
             $bestReg = $regVersions | Sort-Object PSPath -Descending | Select-Object -First 1
@@ -399,9 +410,8 @@ if (-not $SkipPython) {
 
     try {
         & $pythonCmd -m pip install -e . --quiet 2>&1 | Out-Null
-        # Find where pip put openry
-        $pyExeDir = Split-Path -Parent (& $pythonCmd -c "import sys; print(sys.executable)")
-        $scriptsDir = Join-Path (Split-Path -Parent $pyExeDir) "Scripts"
+        # Use Python to tell us where scripts are installed (handles venv, system, user installs)
+        $scriptsDir = & $pythonCmd -c "import sysconfig; print(sysconfig.get_path('scripts'))" 2>&1
         $openryExe = Join-Path $scriptsDir "openry.exe"
 
         if (Test-Path $openryExe) {
@@ -463,7 +473,9 @@ $seedDir = Join-Path $ScriptDir "seed"
 if (Test-Path $seedDir) {
     # First-time only: don't overwrite user data on reinstall
     if (-not (Test-Path (Join-Path $OpenryHome "workflows"))) {
-        Copy-Item "$seedDir\*" -Destination "$OpenryHome\" -Recurse -Force -ErrorAction SilentlyContinue
+        # Use robocopy — PowerShell Copy-Item -Recurse has a known bug that
+        # flattens single-file subdirectories (e.g. agent-workspace/ → loose AGENTS.md)
+        robocopy "$seedDir" "$OpenryHome" /E /NFL /NDL /NJH /NJS 2>&1 | Out-Null
         Write-OK "Initialized $OpenryHome from seed/"
     } else {
         Write-Host "  ~/.openry already exists, preserving user data" -ForegroundColor Cyan
@@ -650,6 +662,7 @@ if ((-not (Test-Path $PluginDir)) -or $SkipPlugin) {
             $bgeLocal = Join-Path $ScriptDir "deps\common\$bgeFile"
             $bgeSHA256 = "c489b6e468a6a3b50e37485f572751dcc0c0caf08e43e6e524b2c2a5f73aed6c"
             $bgeOk = $false
+            $bgeTar = $null   # only set by 'local' and 'auto/github' branches; modelscope installs directly
 
             switch ($BgeSource) {
                 "local" {
@@ -723,11 +736,16 @@ print('OK')
                 New-Item -ItemType Directory -Force $bgeTmp | Out-Null
                 try {
                     tar -xzf $bgeTar -C $bgeTmp 2>&1 | Out-Null
-                    $installScript = Join-Path $bgeTmp "bge-m3-bundle\install-bge-m3.sh"
-                    # On Windows, try running the install script with bash if available
-                    if (Test-Path $installScript) {
+                    $bundleDir = Join-Path $bgeTmp "bge-m3-bundle"
+                    # Prefer native PowerShell script on Windows; fall back to bash + .sh
+                    $ps1Script = Join-Path $bundleDir "install-bge-m3.ps1"
+                    $shScript  = Join-Path $bundleDir "install-bge-m3.sh"
+                    if (Test-Path $ps1Script) {
+                        & powershell -NoProfile -ExecutionPolicy Bypass -File $ps1Script -PluginDir $PluginDir 2>&1 | Out-Null
+                        Write-OK "BGE-M3 model installed"
+                    } elseif (Test-Path $shScript) {
                         if (Get-Command bash -ErrorAction SilentlyContinue) {
-                            bash $installScript $PluginDir 2>&1 | Out-Null
+                            bash $shScript $PluginDir 2>&1 | Out-Null
                             Write-OK "BGE-M3 model installed"
                         } else {
                             Write-Warn "bash not available — BGE-M3 install script skipped"

@@ -1,8 +1,8 @@
 # Installer Refactor Design
 
-> 状态：macOS 实现完成并通过测试，Windows 待验证
-> 日期：2026-08-11
-> 测试：install → uninstall → reinstall → tools sync 四轮全通过
+> 状态：macOS ✅ 完成并测试 | Windows ✅ 完成并测试（2026-08-11）
+> 测试：install → uninstall → reinstall → tools sync 四轮全通过（双平台）
+> Windows 额外修复：8 个 Bug（见第十一节）
 
 ---
 
@@ -447,79 +447,74 @@ fi
 - GitCode 三级 fallback 端到端 → 本地缺失 deps/ → GitHub 限速断开 → GitCode sparse clone → deps/ 拉取成功 → sha256 校验通过 → 安装完成
 - deps/ 缓存回写 → GitCode 拉取后写入本地 deps/，下次安装命中 Priority 1
 
-### 10.2 Windows — 代码已同步，待测试
+### 10.2 Windows — 实现完成 ✅（2026-08-11）
 
 | 文件 | 状态 | 说明 |
 |---|---|
-| `scripts/install.ps1` | ⚠️ 已改写，未在 Windows 上测试 | 逻辑与 install.sh 对齐 |
-| `scripts/uninstall.ps1` | 无需改动 | 薄包装 |
+| `scripts/install.ps1` | ✅ 完成并测试 | install → uninstall → reinstall → tools sync 全流程通过 |
+| `scripts/uninstall.ps1` | ✅ 无需改动 | 薄包装，底层 cmd_uninstall 已覆盖 |
+| `openry/cli.py` → `cmd_uninstall()` | ✅ 完成并测试 | 7 项清理全部到位，包括 Xenova BGE-M3 缓存 |
+| `openry/cli.py` → `cmd_tools_sync()` | ✅ 完成并测试 | `--check` / `--restart` 均通过 |
+| `seed/tools.yaml` | ✅ 完成并测试 | 增减 tool 正确同步到两处配置 |
 
-**待验证**：需在 Windows 10/11 + PowerShell 7 环境中完整跑一遍安装→卸载→重装流程。
+**已测试场景**（4 轮全通过）：
+- ✅ 全新安装 → openry 可用，BGE-M3 4 文件完整（~580 MB），plugin 注册成功
+- ✅ `openry tools sync --check` → 干跑报告差异
+- ✅ `openry tools sync --restart` → 同步 + Gateway 重启一条命令
+- ✅ 增减 tool → 正确传播到 contracts.tools + agent alsoAllow
+- ✅ 重装不丢用户数据 → `~/.openry/workflows/` 保留，seed 目录结构完整（5 子目录）
+- ✅ `openry uninstall --with-openclaw --force` → 7 项全部清理干净（含 Xenova 缓存），exit 0
+- ✅ Agent workspace 路径有效 → `~/.openry/agent-workspace/` 正确创建（robocopy 替代 Copy-Item）
 
-**Windows 测试方案**（参照 macOS 已验证的 9 个场景）：
-
-```powershell
-# === 环境准备 ===
-# 从 GitCode 克隆（自带 deps/，无需 LFS）
-git clone https://gitcode.com/yifan850902/openry.git
-cd openry
-
-# === 第一轮：全新安装 ===
-pwsh -File scripts/install.ps1
-# 验证：
-openry -c 'echo hello'
-openclaw plugins list | Select-String orchestrator
-ls $env:USERPROFILE\.openry\workflows\
-ls .\orchestrator-plugin\dist\index.js
-
-# === 第二轮：tools sync ===
-# 干跑
-openry tools sync --check
-# 模拟添加 tool（编辑 seed/tools.yaml 加一行 - openry_test）
-# 生效
-openry tools sync --restart
-# 验证配置文件
-python -c "import json; c=json.load(open('.\\orchestrator-plugin\\openclaw.plugin.json')); print(c['contracts']['tools'])"
-python -c "import json; c=json.load(open('$env:USERPROFILE\\.openclaw\\openclaw.json')); a=[x for x in c['agents']['list'] if x['id']=='openry-worker']; print(a[0]['tools']['alsoAllow'])"
-# 清理测试 tool（删掉 openry_test 行）→ openry tools sync --restart
-
-# === 第三轮：seed 保护（重装不丢数据） ===
-New-Item -ItemType File -Path "$env:USERPROFILE\.openry\workflows\_test_keep.yaml"
-pwsh -File scripts/install.ps1
-# 验证输出中有 "preserving user data"
-Test-Path "$env:USERPROFILE\.openry\workflows\_test_keep.yaml"  # 应为 True
-
-# === 第四轮：卸载 ===
-Remove-Item "$env:USERPROFILE\.openry\workflows\_test_keep.yaml"
-openry uninstall --with-openclaw --force
-# 验证清理干净：
-# - $env:USERPROFILE\.openry 不存在
-# - .\orchestrator-plugin\node_modules 不存在
-# - .\orchestrator-plugin\dist 不存在
-# - $env:USERPROFILE\.local\bin\openry.cmd 不存在
-# - openclaw.json 中无 openry-worker
-# - openclaw plugins list 中无 orchestrator-plugin
-
-# === 第五轮（可选）：GitHub 慢速 → GitCode fallback ===
-# 删除 deps\ 目录后重装，观察是否：
-# 1. 尝试 GitHub Releases 下载
-# 2. 速度低于 100KB/s 持续 15s 后自动断开
-# 3. 流入 GitCode sparse clone 拉取 deps/
-# 4. dep/ 缓存回写，sha256 校验通过
-```
-
-**Windows 特有注意事项**：
-- `curl.exe` 参数 `--speed-limit` / `--speed-time` 在 Windows 版 curl 中同样支持
-- `tar -xzf` 在 Windows 10 1803+ 和 PowerShell 7 中内置可用
-- Python 检测优先用 `py` 启动器，fallback 到 `python`/`python3`
-- `$env:TEMP` 用于 GitCode 临时 clone 目录，无 `/tmp` 路径问题
-- `Get-FileHash -Algorithm SHA256` 替代 `shasum -a 256`
-- `git sparse-checkout` 在 Windows 版 Git 中同样支持
+**Windows 特有修复**（见第十一节详细记录）：
+| Bug | 说明 |
+|---|---|
+| `Resolve-Asset` 缺少闭合 `}` | 脚本完全无法解析 → 添加缺失括号 |
+| 双重 `Split-Path -Parent` | Scripts 路径错误（`C:\Scripts`）→ 改用 `sysconfig.get_path('scripts')` |
+| 注册表 `Get-ItemProperty` 通配符 | 不支持 `*` → `Get-ChildItem` + 逐个查询 |
+| `_kill_openry_processes` 杀全部 Python | `taskkill /F /IM python.exe` → 临时 .ps1 精准匹配 openry |
+| `_clean_shell_config` 设空字符串 | `setx ""` → `[Environment]::SetEnvironmentVariable(..., $null)` |
+| `$bgeTar` 未显式初始化 | 靠 `$null` 兜底 → 显式 `$bgeTar = $null` |
+| BGE-M3 找不到 `.ps1` 安装脚本 | 只查 `.sh` → 优先 `.ps1` + `-ExecutionPolicy Bypass` |
+| `tools sync --restart` 找不到 openclaw | `subprocess.run` 不补全 `.CMD` → `shutil.which()` 解析 |
+| seed Copy-Item 扁平化子目录 | `Copy-Item -Recurse` bug → `robocopy /E` |
 
 ### 10.3 已知局限
 
 | 问题 | 严重程度 | 说明 |
 |---|---|---|
 | `pip install --user -e .` 在 macOS Xcode Python 3.9 下静默失败 | 低 | 已通过 wrapper fallback 兜底，不影响使用 |
-| `openclaw gateway restart` 首次安装后需手动执行 | 低 | install.sh 末尾有提示，`tools sync --restart` 已自动处理 |
+| `openclaw gateway restart` 首次安装后需手动执行 | 低 | install.sh 末尾有提示，`tools sync --restart` 已自动处理（Windows 已修复 shutil.which 问题） |
 | ModelScope SDK fallback 未端到端测试 | 低 | 代码已实现 `--bge-source=modelscope` 路径，国内场景优先级低 |
+| GitHub 慢速 → GitCode fallback 未在 Windows 上端到端测试 | 低 | 代码已实现，逻辑与 macOS 一致 |
+| `PowerShell ExecutionPolicy` 可能阻止 `.ps1` 运行 | 低 | BGE-M3 安装已加 `-ExecutionPolicy Bypass`，但用户环境可能有额外组策略限制 |
+
+---
+
+## 十一、Windows 代码审查 Bug 清单（2026-08-11）— 全部已修复 ✅
+
+> 审查 + 测试范围：`scripts/install.ps1`、`scripts/uninstall.ps1`、`openry/cli.py`
+> 原则：只做新增/扩展性修改，不触碰 macOS 已固化代码路径
+
+### 11.1 静态审查发现的 Bug（6 个，已修复）
+
+| # | 严重度 | 文件 | 问题 | 修复 |
+|---|--------|------|------|------|
+| 1 | 🔴 | `install.ps1:58,107` | `Resolve-Asset` 函数缺少闭合 `}`，脚本无法解析 | 添加 2 个 `}` + `return $null` |
+| 2 | 🟠 | `cli.py:870` | `taskkill /F /IM python.exe` 杀全部 Python 进程 | 临时 .ps1 脚本精准匹配 openry 进程 |
+| 3 | 🟠 | `install.ps1:262` | `Get-ItemProperty` 不支持通配符 `*` | `Get-ChildItem` + 逐个 `Get-ItemProperty` |
+| 4 | 🟠 | `cli.py:883` | `setx OPENRY_HOME ""` 设空字符串而非删除 | `[Environment]::SetEnvironmentVariable(..., $null)` |
+| 5 | 🟠 | `install.ps1:405` | 双重 `Split-Path -Parent` → `C:\Scripts`（错误） | `sysconfig.get_path('scripts')` |
+| 6 | 🟡 | `install.ps1:705` | `$bgeTar` 在 modelscope 路径未显式初始化 | 显式 `$bgeTar = $null` |
+
+### 11.2 测试中发现的额外 Bug（3 个，已修复）
+
+| # | 严重度 | 文件 | 问题 | 修复 |
+|---|--------|------|------|------|
+| 7 | 🟠 | `install.ps1:740` | BGE-M3 tar 中有 `install-bge-m3.ps1` 但未使用；且 ExecutionPolicy 阻止运行 | 优先 `.ps1` + `-ExecutionPolicy Bypass`；fallback `.sh`+bash |
+| 8 | 🟠 | `cli.py:1199` | `cmd_tools_sync` 调用 `subprocess.run(["openclaw"])` 不补全 `.CMD` 扩展名 | 加 `shutil.which("openclaw")` 解析 |
+| 9 | 🟠 | `install.ps1:456` | `Copy-Item -Recurse` 扁平化单文件子目录（如 `agent-workspace/`） | `robocopy /E` 替代 |
+
+### 11.3 未触碰的 macOS 代码
+
+所有 `cli.py` 修复均在 `if sys.platform == "win32"` 分支内，macOS 的 `else` 分支零改动。`install.sh` 未做任何修改。
