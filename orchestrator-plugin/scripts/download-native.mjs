@@ -31,6 +31,10 @@ const MIRRORS = [
   "",  // direct GitHub
 ];
 
+// Local deps/ fallback — deps/common/ shipped with GitCode clone for offline installs
+const REPO_ROOT = join(pluginDir, "..");
+const LOCAL_DEPS = join(REPO_ROOT, "deps", "common");
+
 // ── 原生模块定义 ─────────────────────────────────────────────────
 
 /**
@@ -146,9 +150,48 @@ function hasLibvipsDlls(dir) {
   return false;
 }
 
-async function downloadLibvips(mod, targetDir, tmpDir) {
+// ── 从本地/下载的 tar 安装 libvips DLL ──────────────────────────
+
+async function installLibvipsFromArchive(tarPath, targetDir, isBrotli) {
+  const tmpDir = join(pluginDir, "node_modules", ".native-tmp");
+  mkdirSync(tmpDir, { recursive: true });
+  const stamp = Date.now();
+  const lvExtract = join(tmpDir, `lv-ext-${stamp}`);
+
+  if (isBrotli) {
+    const { brotliDecompressSync } = await import("node:zlib");
+    const tarData = brotliDecompressSync(readFileSync(tarPath));
+    const rawTar = join(tmpDir, `lv-${stamp}.tar`);
+    writeFileSync(rawTar, tarData);
+    extractTarGz(rawTar, lvExtract);
+    try { rmSync(rawTar, { force: true }); } catch {}
+  } else {
+    extractTarGz(tarPath, lvExtract);
+  }
+  copyAllDlls(lvExtract, targetDir);
+  try { rmSync(lvExtract, { recursive: true, force: true }); } catch {}
+}
+
+async function downloadLibvips(mod, targetDir) {
   const lv = mod.libvips;
+
+  // ── Priority 1: local deps/common/ ──
+  const localPath = join(LOCAL_DEPS, lv.fileName);
+  if (existsSync(localPath)) {
+    try {
+      console.log(`  libvips trying local (${localPath}) ...`);
+      await installLibvipsFromArchive(localPath, targetDir, lv.isBrotli);
+      console.log(`  ✓ libvips: installed (local)`);
+      return;
+    } catch (err) {
+      console.log(`  libvips local ✗ ${err.message}`);
+    }
+  }
+
+  // ── Priority 2: GitHub Releases ──
   const lvBase = `https://github.com/${lv.repo}/releases/download/v${lv.version}/${lv.fileName}`;
+  const tmpDir = join(pluginDir, "node_modules", ".native-tmp");
+  mkdirSync(tmpDir, { recursive: true });
   const lvTarPath = join(tmpDir, lv.fileName);
 
   for (const mirror of MIRRORS) {
@@ -156,21 +199,8 @@ async function downloadLibvips(mod, targetDir, tmpDir) {
       const lvUrl = mirror + lvBase;
       const label = mirror ? new URL(mirror).hostname : "github.com";
       console.log(`  libvips trying ${label} ...`);
-      if (lv.isBrotli) {
-        await downloadFile(lvUrl, lvTarPath);
-        const { brotliDecompressSync } = await import("node:zlib");
-        const tarData = brotliDecompressSync(readFileSync(lvTarPath));
-        const rawTar = join(tmpDir, `lv-${mod.name}.tar`);
-        writeFileSync(rawTar, tarData);
-        const lvExtract = join(tmpDir, `lv-ext-${mod.name}`);
-        extractTarGz(rawTar, lvExtract);
-        copyAllDlls(lvExtract, targetDir);
-      } else {
-        await downloadFile(lvUrl, lvTarPath);
-        const lvExtract = join(tmpDir, `lv-ext-${mod.name}`);
-        extractTarGz(lvTarPath, lvExtract);
-        copyAllDlls(lvExtract, targetDir);
-      }
+      await downloadFile(lvUrl, lvTarPath);
+      await installLibvipsFromArchive(lvTarPath, targetDir, lv.isBrotli);
       console.log(`  ✓ libvips: installed`);
       return;
     } catch (err) {
@@ -196,7 +226,7 @@ async function handleModule(mod) {
     // Check libvips separately (may have been nuked by npm install)
     if (mod.libvips && !hasLibvipsDlls(targetDir)) {
       console.log(`[download-native] ${mod.name}: libvips DLLs missing, downloading...`);
-      await downloadLibvips(mod, targetDir, tmpDir);
+      await downloadLibvips(mod, targetDir);
     }
 
     return true;
@@ -237,37 +267,20 @@ async function handleModule(mod) {
 
       // ── libvips extra download (sharp only) ──
       if (mod.libvips) {
+        // Try local deps/ first, then GitHub
         const lv = mod.libvips;
-        const lvBase = `https://github.com/${lv.repo}/releases/download/v${lv.version}/${lv.fileName}`;
-        const lvTarPath = join(tmpDir, lv.fileName);
-        for (const mirror of MIRRORS) {
+        const localLv = join(LOCAL_DEPS, lv.fileName);
+        if (existsSync(localLv)) {
           try {
-            const lvUrl = mirror + lvBase;
-            const label = mirror ? new URL(mirror).hostname : "github.com";
-            console.log(`  libvips trying ${label} ...`);
-            if (lv.isBrotli) {
-              // .tar.br → decompress brotli → untar
-              await downloadFile(lvUrl, lvTarPath);
-              const { brotliDecompressSync } = await import("node:zlib");
-              const brData = readFileSync(lvTarPath);
-              const tarData = brotliDecompressSync(brData);
-              const rawTar = join(tmpDir, `libvips-${mod.name}.tar`);
-              writeFileSync(rawTar, tarData);
-              const lvExtract = join(tmpDir, `lv-ext-${mod.name}`);
-              extractTarGz(rawTar, lvExtract);
-              copyAllDlls(lvExtract, targetDir);
-            } else {
-              await downloadFile(lvUrl, lvTarPath);
-              const lvExtract = join(tmpDir, `lv-ext-${mod.name}`);
-              extractTarGz(lvTarPath, lvExtract);
-              copyAllDlls(lvExtract, targetDir);
-            }
-            console.log(`  ✓ libvips: installed`);
-            break;
+            console.log(`  libvips trying local (${localLv}) ...`);
+            await installLibvipsFromArchive(localLv, targetDir, lv.isBrotli);
+            console.log(`  ✓ libvips: installed (local)`);
           } catch (err) {
-            console.log(`  libvips ✗ ${err.message}`);
-            try { rmSync(lvTarPath, { force: true }); } catch {}
+            console.log(`  libvips local ✗ ${err.message}`);
+            await downloadLibvips(mod, targetDir);
           }
+        } else {
+          await downloadLibvips(mod, targetDir);
         }
       }
 
