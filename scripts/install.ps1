@@ -562,7 +562,7 @@ if ((-not (Test-Path $PluginDir)) -or $SkipPlugin) {
         # ── Resolve plugin bundle ──
         $pluginBundleName = "orchestrator-plugin-bundle-win.tar.gz"
         $pluginBundleLocal = Join-Path $ScriptDir "deps\windows\$pluginBundleName"
-        $pluginSHA256 = "8c0373bd38bdd8af96cb5e8f76d4116a770e08eabbff27a528b24e656fa03ddd"
+        $pluginSHA256 = "956740690c9fe62bc58ccb070c6ecea4a863776fa056b89a7fb8168622e0fddf"
 
         $bundleFile = Resolve-Asset -AssetName $pluginBundleName `
             -LocalPath $pluginBundleLocal `
