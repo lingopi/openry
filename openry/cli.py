@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -936,15 +937,15 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     # ── 1. Stop gateway (--with-openclaw only) ──
     if args.with_openclaw:
         print("Stopping OpenClaw gateway...")
-        _run_cmd(["openclaw", "gateway", "stop"], timeout=10)
-        print("  ✓ Gateway stopped")
+        if _run_cmd(["openclaw", "gateway", "stop"], timeout=10):
+            print("  ✓ Gateway stopped")
 
     # ── 2. Unregister plugin (--with-openclaw only) ──
     if args.with_openclaw:
         print("Unregistering orchestrator-plugin...")
-        _run_cmd(["openclaw", "plugins", "uninstall", "orchestrator-plugin"],
-                 input=b"y\n", timeout=15)
-        print("  ✓ Plugin unregistered")
+        if _run_cmd(["openclaw", "plugins", "uninstall", "orchestrator-plugin"],
+                    input=b"y\n", timeout=15):
+            print("  ✓ Plugin unregistered")
 
     # ── 3. Remove agent from openclaw.json (--with-openclaw only) ──
     if args.with_openclaw:
@@ -984,21 +985,49 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     else:
         print("  Keeping ~/.openry (--keep-data)")
 
+    # ── 4.5 Clean egg-info (editable install residue) ──
+    try:
+        import openry as _openry
+        _repo_root = Path(_openry.__path__[0]).parent
+        _egg_info = _repo_root / "openry.egg-info"
+        if _egg_info.exists():
+            shutil.rmtree(_egg_info, ignore_errors=True)
+            print(f"  ✓ Removed {_egg_info}")
+    except Exception:
+        pass
+
     # ── 5. Clean shell config ──
     if not args.keep_env:
         _clean_shell_config(home)
     else:
         print("  Keeping shell config (--keep-env)")
 
-    # ── 6. Model cache (--with-openclaw only) ──
+    # ── 6. Plugin artifacts (--with-openclaw only) ──
+    # Cleans the orchestrator-plugin directory inside the repo:
+    #   - node_modules / dist (build artifacts)
+    #   - @xenova/transformers/.cache (BGE-M3 model cache — the real one)
+    # Note: ~/.cache/huggingface and ~/.cache/transformers are Python-ecosystem
+    # caches that OpenRY does NOT use; they are deliberately NOT cleaned here.
     if args.with_openclaw:
-        for cache_dir in [home / ".cache" / "huggingface", home / ".cache" / "transformers"]:
-            if cache_dir.exists():
-                try:
-                    shutil.rmtree(cache_dir, ignore_errors=True)
-                    print(f"  ✓ Removed {cache_dir}")
-                except Exception:
-                    print(f"  ⚠ Could not remove {cache_dir}")
+        try:
+            import openry as _openry
+            _repo_root = Path(_openry.__path__[0]).parent
+            _plugin_dir = _repo_root / "orchestrator-plugin"
+            if _plugin_dir.exists():
+                # Xenova BGE-M3 cache (the path actually used by the plugin)
+                _xenova_cache = _plugin_dir / "node_modules" / "@xenova" / "transformers" / ".cache"
+                if _xenova_cache.exists():
+                    shutil.rmtree(_xenova_cache, ignore_errors=True)
+                    print(f"  ✓ Removed Xenova BGE-M3 cache: {_xenova_cache}")
+
+                # Plugin build artifacts
+                for _sub in ["node_modules", "dist"]:
+                    _p = _plugin_dir / _sub
+                    if _p.exists():
+                        shutil.rmtree(_p, ignore_errors=True)
+                        print(f"  ✓ Removed {_p}")
+        except Exception as e:
+            print(f"  ⚠ Could not clean plugin directory: {e}")
 
     # ── 7. Self-uninstall (detached background process) ──
     if args.with_openclaw:
@@ -1057,6 +1086,125 @@ def _spawn_self_uninstall(home: Path) -> None:
             start_new_session=True,
             stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
         )
+
+
+def cmd_tools_sync(args: argparse.Namespace) -> None:
+    """Sync tool configuration from seed/tools.yaml to OpenClaw configs.
+
+    openry tools sync                   # Sync both contracts and agent config
+    openry tools sync --check           # Dry-run: report differences only
+    """
+    import yaml
+    from pathlib import Path as _Path
+
+    home = _Path.home()
+    try:
+        import openry as _openry
+        repo_root = _Path(_openry.__path__[0]).parent
+    except Exception:
+        print("✗ Could not locate OpenRY repo root")
+        return
+
+    tools_yaml = repo_root / "seed" / "tools.yaml"
+    plugin_json = repo_root / "orchestrator-plugin" / "openclaw.plugin.json"
+    ocl_config = home / ".openclaw" / "openclaw.json"
+
+    if not tools_yaml.exists():
+        print(f"✗ Not found: {tools_yaml}")
+        return
+    if not plugin_json.exists():
+        print(f"✗ Not found: {plugin_json} (is the plugin installed?)")
+        return
+
+    # Read tools.yaml
+    with open(tools_yaml, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    tools = data.get("tools", [])
+    if not tools:
+        print("✗ No tools defined in seed/tools.yaml")
+        return
+
+    print(f"Tools from seed/tools.yaml: {', '.join(tools)}")
+    print()
+
+    changes_made = False
+
+    # ── 1. Update openclaw.plugin.json contracts.tools ──
+    import json
+    with open(plugin_json, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    old_contracts = cfg.get("contracts", {}).get("tools", [])
+
+    if args.check:
+        added = [t for t in tools if t not in old_contracts]
+        removed = [t for t in old_contracts if t not in tools]
+        if added:
+            print(f"  Would add to contracts.tools: {added}")
+        if removed:
+            print(f"  Would remove from contracts.tools: {removed}")
+        if not added and not removed:
+            print("  contracts.tools: up to date")
+    else:
+        cfg.setdefault("contracts", {})["tools"] = tools
+        with open(plugin_json, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        print(f"  ✓ Updated openclaw.plugin.json contracts.tools")
+        changes_made = True
+
+    # ── 2. Update ~/.openclaw/openclaw.json agent alsoAllow ──
+    if ocl_config.exists():
+        with open(ocl_config, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+
+        found = False
+        for a in cfg.get("agents", {}).get("list", []):
+            if a.get("id") == "openry-worker":
+                old_tools = a.get("tools", {}).get("alsoAllow", [])
+                if args.check:
+                    added = [t for t in tools if t not in old_tools]
+                    removed = [t for t in old_tools if t not in tools]
+                    if added:
+                        print(f"  Would add to agent alsoAllow: {added}")
+                    if removed:
+                        print(f"  Would remove from agent alsoAllow: {removed}")
+                    if not added and not removed:
+                        print("  agent alsoAllow: up to date")
+                else:
+                    a.setdefault("tools", {})["alsoAllow"] = tools
+                    if "profile" not in a.get("tools", {}):
+                        a["tools"]["profile"] = "minimal"
+                    print(f"  ✓ Updated agent 'openry-worker' alsoAllow")
+                    changes_made = True
+                found = True
+                break
+
+        if not found:
+            print(f"  ⚠ Agent 'openry-worker' not found in openclaw.json (run install.sh first)")
+        elif not args.check:
+            with open(ocl_config, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+    else:
+        print(f"  ⚠ openclaw.json not found")
+
+    print()
+    if args.check:
+        print("Dry-run complete. Run without --check to apply changes.")
+    elif changes_made:
+        print("✓ Tool config sync complete.")
+        if args.restart:
+            print("  Restarting OpenClaw gateway...")
+            try:
+                subprocess.run(["openclaw", "gateway", "restart"], check=False)
+            except FileNotFoundError:
+                print("  ⚠ openclaw not found")
+            except Exception as e:
+                print(f"  ⚠ Gateway restart failed: {e}")
+        else:
+            print("  Run: openclaw gateway restart")
+    else:
+        print("✓ All configs up to date.")
 
 
 def _detect_shell_rc() -> Path:
@@ -1121,6 +1269,24 @@ def main() -> None:
         cmd_uninstall(uninstall_args)
         return
 
+    # Route 'tools sync' subcommand
+    if len(sys.argv) > 1 and sys.argv[1] == "tools" and len(sys.argv) > 2 and sys.argv[2] == "sync":
+        tools_parser = argparse.ArgumentParser(
+            prog="openry tools sync",
+            description="Sync tool configuration from seed/tools.yaml to OpenClaw configs.",
+        )
+        tools_parser.add_argument(
+            "--check", action="store_true",
+            help="Dry-run: report differences without making changes",
+        )
+        tools_parser.add_argument(
+            "--restart", "-r", action="store_true",
+            help="Restart OpenClaw gateway after sync (one-command apply)",
+        )
+        tools_args = tools_parser.parse_args(sys.argv[3:])
+        cmd_tools_sync(tools_args)
+        return
+
     # Default mode: -c or --status (Phase 1/2 backward compatible)
     parser = argparse.ArgumentParser(
         prog="openry",
@@ -1129,6 +1295,7 @@ def main() -> None:
             "Subcommands:\n"
             "  openry serve [--port PORT]     Start the web dashboard\n"
             "  openry uninstall [OPTIONS]     Remove OpenRY data and configuration\n"
+            "  openry tools sync [--check]    Sync tool config from seed/tools.yaml\n"
             "\n"
             "Examples:\n"
             "  openry -c 'echo hello'\n"

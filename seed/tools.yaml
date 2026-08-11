@@ -1,0 +1,20 @@
+# OpenRY Agent Tool 配置（单一事实来源）
+# ============================================================================
+# 安装时自动同步到：
+#   1. orchestrator-plugin/openclaw.plugin.json → contracts.tools
+#   2. ~/.openclaw/openclaw.json → agent alsoAllow
+#
+# 添加自定义 tool 的步骤：
+#   1. 在 plugin 代码中 api.registerTool("openry_xxx", ...)
+#   2. 在下面加一行: - openry_xxx
+#   3. npm run build
+#   4. 运行: bash scripts/reconfigure.sh
+#   5. openclaw gateway restart
+#
+# 注意：这里只负责"声明"tool 给 agent 可见，tool 的"实现"仍需在 plugin 代码中注册。
+# ============================================================================
+tools:
+  - openry_run
+  - openry_status
+  - openry_payload_query
+  - openry_knowledge_query
