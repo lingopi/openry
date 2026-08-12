@@ -29,6 +29,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Track errors for final summary
+$InstallErrors = @()
+
 # ── Colors / output helpers ────────────────────────────────────────────
 function Write-OK   { Write-Host "  ✓ $args" -ForegroundColor Green }
 function Write-Warn { Write-Host "  ⚠ $args" -ForegroundColor Yellow }
@@ -84,7 +87,7 @@ function Resolve-Asset {
     Remove-Item $TmpPath -Force -ErrorAction SilentlyContinue
 
     try {
-        & curl.exe -fSL --connect-timeout 10 --speed-limit 102400 --speed-time 15 --progress-bar -C - -o $TmpPath $RemoteUrl 2>&1
+        & curl.exe -fSL --connect-timeout 10 --speed-limit 102400 --speed-time 15 --progress-bar -C - -o $TmpPath $RemoteUrl
         if ($LASTEXITCODE -eq 0) {
             $Actual = Get-SHA256Hash -FilePath $TmpPath
             if ($Actual -eq $ExpectedSHA256) {
@@ -112,15 +115,29 @@ function Resolve-Asset {
         $GitCodeOk = $false
 
         try {
-            & git clone --depth 1 --filter=blob:none $GitCodeUrl $TmpClone 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
+            # Clone with 120-second timeout via .NET Process (preserves console output)
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "git"
+            $psi.Arguments = "clone --depth 1 --filter=blob:none $GitCodeUrl $TmpClone"
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $false
+            $psi.RedirectStandardError = $false
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $cloneFinished = $proc.WaitForExit(120000)  # 120 seconds
+            if (-not $cloneFinished) {
+                $proc.Kill()
+                Write-Warn "GitCode clone timed out (120s limit)"
+            }
+            $cloneOk = ($cloneFinished -and $proc.ExitCode -eq 0)
+
+            if ($cloneOk) {
                 # Try sparse-checkout; fall back to full checkout if it fails
                 Push-Location $TmpClone
                 try {
-                    & git sparse-checkout set deps/ 2>&1 | Out-Null
+                    & git sparse-checkout set deps/
                 } catch {
                     # Older git without sparse-checkout — full checkout is fine
-                    & git checkout 2>&1 | Out-Null
+                    & git checkout
                 }
                 Pop-Location
 
@@ -572,6 +589,7 @@ if ((-not (Test-Path $PluginDir)) -or $SkipPlugin) {
         if (-not $bundleFile) {
             Write-Err "Plugin bundle unavailable — local deps/ and GitHub Releases both failed"
             Write-Warn "Skipping plugin (you can re-run after fixing network or deps/)"
+            $InstallErrors += "  - Plugin bundle download failed (check network or deps/)"
         } else {
             # ── Extract ──
             Write-Host "  Extracting plugin bundle..."
@@ -580,6 +598,7 @@ if ((-not (Test-Path $PluginDir)) -or $SkipPlugin) {
                 Write-OK "Plugin bundle extracted"
             } catch {
                 Write-Err "Extraction failed: $_"
+                $InstallErrors += "  - Plugin bundle extraction failed"
             }
 
             # Verify dist/index.js
@@ -596,6 +615,7 @@ if ((-not (Test-Path $PluginDir)) -or $SkipPlugin) {
 
             if (-not (Test-Path (Join-Path $PluginDir "dist\index.js"))) {
                 Write-Err "Plugin dist\index.js not found — cannot register"
+                $InstallErrors += "  - Plugin dist\index.js missing (try: cd orchestrator-plugin; npm install; npm run build)"
             } else {
                 # ── Sync tool config from seed/tools.yaml BEFORE plugin registration ──
                 Write-Host "  Syncing tool configuration from seed/tools.yaml..."
@@ -756,6 +776,7 @@ print('OK')
                     }
                 } catch {
                     Write-Err "BGE-M3 extraction failed: $_"
+                    $InstallErrors += "  - BGE-M3 extraction failed"
                 }
                 Remove-Item $bgeTmp -Recurse -Force -ErrorAction SilentlyContinue
             }
@@ -765,6 +786,7 @@ print('OK')
                 Write-OK "BGE-M3 verified complete"
             } elseif (-not $bgeOk) {
                 Write-Warn "BGE-M3 not installed — will download on first use (requires network)"
+                $InstallErrors += "  - BGE-M3 model not installed (will download on first use)"
             }
         }  # bgeNeedInstall
 
@@ -778,14 +800,35 @@ print('OK')
 # Done
 # ═══════════════════════════════════════════════════════════════════════
 
-Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║  OpenRY installation complete!                   ║" -ForegroundColor Green
-Write-Host "╚══════════════════════════════════════════════════╝" -ForegroundColor Green
+Write-Host ""
+if ($InstallErrors.Count -eq 0) {
+    Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Green
+    Write-Host "║  OpenRY installation complete!                   ║" -ForegroundColor Green
+    Write-Host "╚══════════════════════════════════════════════════╝" -ForegroundColor Green
+} else {
+    Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Yellow
+    Write-Host "║  OpenRY installed with warnings (see below)      ║" -ForegroundColor Yellow
+    Write-Host "╚══════════════════════════════════════════════════╝" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Installation issues:" -ForegroundColor Yellow
+    $InstallErrors | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
+}
 Write-Host ""
 Write-Host "  Next steps:" -ForegroundColor Cyan
 Write-Host "    1. openclaw gateway restart" -ForegroundColor White
 Write-Host "    2. openry serve --port 9100" -ForegroundColor White
 Write-Host "  Then open http://127.0.0.1:9100" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  Download sources (if local deps/ unavailable):" -ForegroundColor Cyan
+Write-Host "    Plugin bundle (Windows):" -ForegroundColor DarkGray
+Write-Host "      GitHub: https://github.com/lingopi/openry/releases/download/plugin-bundle-v1.0/orchestrator-plugin-bundle-win.tar.gz" -ForegroundColor DarkGray
+Write-Host "      GitCode: https://gitcode.com/yifan850902/openry.git  (deps/windows/)" -ForegroundColor DarkGray
+Write-Host "    Plugin bundle (macOS):" -ForegroundColor DarkGray
+Write-Host "      GitHub: https://github.com/lingopi/openry/releases/download/plugin-bundle-v1.0/orchestrator-plugin-bundle-macos.tar.gz" -ForegroundColor DarkGray
+Write-Host "      GitCode: https://gitcode.com/yifan850902/openry.git  (deps/macos/)" -ForegroundColor DarkGray
+Write-Host "    BGE-M3 model:" -ForegroundColor DarkGray
+Write-Host "      GitHub: https://github.com/lingopi/openry/releases/download/bge-m3-v1.0/bge-m3-offline.tar.gz" -ForegroundColor DarkGray
+Write-Host "      GitCode: https://gitcode.com/yifan850902/openry.git  (deps/common/)" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Verify: openry -c 'echo hello'" -ForegroundColor DarkGray
 Write-Host ""

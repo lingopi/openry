@@ -32,6 +32,9 @@ SKIP_PLUGIN=false
 FORCE=false
 BGE_SOURCE="auto"   # auto | local | github | modelscope
 
+# Track errors for final summary
+INSTALL_ERRORS=""
+
 for arg in "$@"; do
     case "$arg" in
         --skip-python)   SKIP_PYTHON=true ;;
@@ -96,56 +99,70 @@ resolve_asset() {
             echo "$local_path"
             return 0
         fi
-        echo -e "  ${YELLOW}⚠ Local file corrupt (sha256 mismatch), re-downloading...${NC}"
+        echo -e "  ${YELLOW}⚠ Local file corrupt (sha256 mismatch), re-downloading...${NC}" >&2
         rm -f "$local_path"
     fi
 
     # ── Step 2: Try GitHub Releases ──
-    echo -e "  Downloading ${asset_name} from GitHub Releases..."
-    echo -e "    ${remote_url}"
+    echo -e "  Downloading ${asset_name} from GitHub Releases..." >&2
+    echo -e "    ${remote_url}" >&2
     mkdir -p "$(dirname "$local_path")"
     if curl -fSL --connect-timeout 10 --speed-limit 102400 --speed-time 15 --progress-bar -C - -o "$local_path.tmp" "$remote_url"; then
         actual=$(sha256_hash "$local_path.tmp" 2>/dev/null) || true
         if [ "$actual" = "$expected_sha256" ]; then
             mv "$local_path.tmp" "$local_path"
-            echo -e "  ${GREEN}✓${NC} sha256 verified, cached to $(dirname "$local_path")/"
+            echo -e "  ${GREEN}✓${NC} sha256 verified, cached to $(dirname "$local_path")/" >&2
             echo "$local_path"
             return 0
         fi
-        echo -e "  ${RED}✗ sha256 mismatch after download${NC}"
+        echo -e "  ${RED}✗ sha256 mismatch after download${NC}" >&2
         rm -f "$local_path.tmp"
     else
-        echo -e "  ${YELLOW}⚠ GitHub Releases failed (connect timeout or unreachable)${NC}"
+        echo -e "  ${YELLOW}⚠ GitHub Releases failed (connect timeout or unreachable)${NC}" >&2
         rm -f "$local_path.tmp"
     fi
 
     # ── Step 3: GitCode sparse clone (only deps/ directory) ──
-    echo -e "  Fetching deps/ from GitCode..."
-    echo -e "    ${gitcode_url}"
+    echo -e "  Fetching deps/ from GitCode..." >&2
+    echo -e "    ${gitcode_url}" >&2
     local tmp_clone="/tmp/openry-deps-clone-$$"
     rm -rf "$tmp_clone" 2>/dev/null
     local deps_parent
     deps_parent="$(dirname "$(dirname "$local_path")")"
     local gitcode_ok=false
 
-    if git clone --depth 1 --filter=blob:none "$gitcode_url" "$tmp_clone" 2>&1; then
+    # Clone with 120-second timeout (perl fallback on macOS; GNU timeout on Linux)
+    _clone_ret=0
+    if command -v timeout &>/dev/null; then
+        timeout 120 git clone --depth 1 --filter=blob:none "$gitcode_url" "$tmp_clone" || _clone_ret=$?
+    elif command -v perl &>/dev/null; then
+        perl -e 'alarm 120; exec @ARGV' -- git clone --depth 1 --filter=blob:none "$gitcode_url" "$tmp_clone" || _clone_ret=$?
+    else
+        git clone --depth 1 --filter=blob:none "$gitcode_url" "$tmp_clone" || _clone_ret=$?
+    fi
+
+    if [ $_clone_ret -eq 0 ]; then
         # Try sparse-checkout; fall back to full checkout if it fails
-        if ( cd "$tmp_clone" && git sparse-checkout set deps/ 2>&1 ); then
+        if ( cd "$tmp_clone" && git sparse-checkout set deps/ ); then
             :
         else
             # Older git without sparse-checkout support — full checkout is fine
-            ( cd "$tmp_clone" && git checkout 2>&1 ) || true
+            ( cd "$tmp_clone" && git checkout ) || true
         fi
 
         if [ -d "$tmp_clone/deps" ]; then
             cp -r "$tmp_clone/deps/"* "$deps_parent/"
-            echo -e "  ${GREEN}✓${NC} deps/ fetched from GitCode"
+            echo -e "  ${GREEN}✓${NC} deps/ fetched from GitCode" >&2
             gitcode_ok=true
         else
-            echo -e "  ${YELLOW}⚠ GitCode clone succeeded but deps/ not found${NC}"
+            echo -e "  ${YELLOW}⚠ GitCode clone succeeded but deps/ not found${NC}" >&2
         fi
     else
-        echo -e "  ${YELLOW}⚠ GitCode clone failed (network or auth issue)${NC}"
+        if [ $_clone_ret -eq 124 ] || [ $_clone_ret -eq 142 ]; then
+            echo -e "  ${YELLOW}⚠ GitCode clone timed out (120s limit)${NC}" >&2
+        else
+            echo -e "  ${YELLOW}⚠ GitCode clone failed (network or auth issue)${NC}" >&2
+        fi
     fi
 
     rm -rf "$tmp_clone" 2>/dev/null
@@ -154,14 +171,14 @@ resolve_asset() {
     if [ "$gitcode_ok" = true ] && [ -f "$local_path" ]; then
         actual=$(sha256_hash "$local_path" 2>/dev/null) || true
         if [ "$actual" = "$expected_sha256" ]; then
-            echo -e "  ${GREEN}✓${NC} sha256 verified"
+            echo -e "  ${GREEN}✓${NC} sha256 verified" >&2
             echo "$local_path"
             return 0
         fi
-        echo -e "  ${RED}✗ sha256 mismatch on GitCode-fetched file${NC}"
+        echo -e "  ${RED}✗ sha256 mismatch on GitCode-fetched file${NC}" >&2
     fi
 
-    echo -e "  ${RED}✗ All sources exhausted for ${asset_name}${NC}"
+    echo -e "  ${RED}✗ All sources exhausted for ${asset_name}${NC}" >&2
     return 1
 }
 
@@ -457,6 +474,7 @@ else
         if [ -z "$BUNDLE_FILE" ] || [ ! -f "$BUNDLE_FILE" ]; then
             echo -e "  ${RED}✗ Plugin bundle unavailable — local deps/ and GitHub Releases both failed${NC}"
             echo -e "  ${YELLOW}⚠ Skipping plugin (you can re-run after fixing network or deps/)${NC}"
+            INSTALL_ERRORS="${INSTALL_ERRORS}  - Plugin bundle download failed (check network or deps/)\n"
         else
             # ── Extract ──
             echo -e "  Extracting plugin bundle..."
@@ -464,6 +482,7 @@ else
                 echo -e "  ${GREEN}✓${NC} Plugin bundle extracted"
             else
                 echo -e "  ${RED}✗ Extraction failed${NC}"
+                INSTALL_ERRORS="${INSTALL_ERRORS}  - Plugin bundle extraction failed\n"
             fi
 
             # Verify dist/index.js
@@ -484,6 +503,7 @@ else
 
             if [ ! -f "$PLUGIN_DIR/dist/index.js" ]; then
                 echo -e "  ${RED}✗ Plugin dist/index.js not found — cannot register${NC}"
+                INSTALL_ERRORS="${INSTALL_ERRORS}  - Plugin dist/index.js missing (try: cd orchestrator-plugin && npm install && npm run build)\n"
             else
                 # ── Register with OpenClaw (idempotent) ──
                 echo -e "  Registering plugin with OpenClaw..."
@@ -613,6 +633,7 @@ print('OK')
                     fi
                 else
                     echo -e "  ${RED}✗ BGE-M3 extraction failed${NC}"
+                    INSTALL_ERRORS="${INSTALL_ERRORS}  - BGE-M3 extraction failed\n"
                 fi
                 rm -rf "$BGE_TMP" 2>/dev/null
             fi
@@ -622,6 +643,7 @@ print('OK')
                 echo -e "  ${GREEN}✓${NC} BGE-M3 verified complete"
             elif [ "$BGE_OK" != true ]; then
                 echo -e "  ${YELLOW}⚠${NC} BGE-M3 not installed — will download on first use (requires network)${NC}"
+                INSTALL_ERRORS="${INSTALL_ERRORS}  - BGE-M3 model not installed (will download on first use)\n"
             fi
         fi
 
@@ -637,9 +659,19 @@ fi  # SKIP_PLUGIN
 # 11. Done
 # ═══════════════════════════════════════════════════════════════════════════
 
-echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║     OpenRY installation complete!                ║${NC}"
-echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
+echo ""
+if [ -z "$INSTALL_ERRORS" ]; then
+    echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}${BOLD}║     OpenRY installation complete!                ║${NC}"
+    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
+else
+    echo -e "${YELLOW}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}${BOLD}║  OpenRY installed with warnings (see below)      ║${NC}"
+    echo -e "${YELLOW}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  ${YELLOW}⚠ Installation issues:${NC}"
+    echo -e "$INSTALL_ERRORS"
+fi
 echo ""
 echo -e "  ${CYAN}Next steps:${NC}"
 if [ "$SKIP_PYTHON" != true ]; then
@@ -651,6 +683,17 @@ echo "  Then open http://127.0.0.1:\${OPENRY_PORT:-9100}"
 echo ""
 echo -e "  ${CYAN}Quick test:${NC}"
 echo "    openry -c 'echo hello'"
+echo ""
+echo -e "  ${CYAN}Download sources (if local deps/ unavailable):${NC}"
+echo "    Plugin bundle (macOS):"
+echo "      GitHub: https://github.com/lingopi/openry/releases/download/plugin-bundle-v1.0/orchestrator-plugin-bundle-macos.tar.gz"
+echo "      GitCode: https://gitcode.com/yifan850902/openry.git  (deps/macos/)"
+echo "    Plugin bundle (Windows):"
+echo "      GitHub: https://github.com/lingopi/openry/releases/download/plugin-bundle-v1.0/orchestrator-plugin-bundle-win.tar.gz"
+echo "      GitCode: https://gitcode.com/yifan850902/openry.git  (deps/windows/)"
+echo "    BGE-M3 model:"
+echo "      GitHub: https://github.com/lingopi/openry/releases/download/bge-m3-v1.0/bge-m3-offline.tar.gz"
+echo "      GitCode: https://gitcode.com/yifan850902/openry.git  (deps/common/)"
 echo ""
 echo -e "  ${CYAN}Directories:${NC}"
 echo "    Workflows:     ${OPENRY_HOME}/workflows/"
