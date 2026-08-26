@@ -18,3 +18,4 @@ tools:
   - openry_status
   - openry_payload_query
   - openry_knowledge_query
+  - openry_analysis_sources

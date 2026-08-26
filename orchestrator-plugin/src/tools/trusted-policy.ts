@@ -20,6 +20,9 @@
 
 const ALLOWED_TOOLS = new Set(["openry_run", "openry_status", "openry_payload_query", "openry_knowledge_query"]);
 
+// 失败取证工具（loop 迭代分析步）
+ALLOWED_TOOLS.add("openry_analysis_sources");
+
 // ── Guidance messages for commonly intercepted tools ───────────
 
 function buildGuidance(

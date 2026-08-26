@@ -21,7 +21,8 @@
       "openry_run",
       "openry_status",
       "openry_payload_query",
-      "openry_knowledge_query"
+      "openry_knowledge_query",
+      "openry_analysis_sources"
     ],
     "trustedToolPolicies": [
       "openry-exec-gate"

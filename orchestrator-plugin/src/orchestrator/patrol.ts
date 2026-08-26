@@ -18,6 +18,7 @@ import {
   getSubStepConfig,
   getFirstSubStep,
   getNextSubStep,
+  findCompositionContaining,
   type BigStep,
   type SubStep,
   type PromptBlock,
@@ -231,6 +232,7 @@ export class PatrolLoop {
     if (!this.running) return;
     try {
       this.reapZombies();        // 1. 清理 activeRuns 中已退出的子进程
+      this.cleanupPayloadTemp(); // 1.5 清理遗留 payload 临时文件（@file 兜底清扫）
       this.checkTimeout();         // 2. 超时检测 → 软刹车
       this.checkMaxToolCalls();    // 3. max_tool_calls 超限检测
       this.forceTimeoutQueued();   // 3.5 Phase B: 压缩超时兜底 → 强制放行
@@ -244,6 +246,7 @@ export class PatrolLoop {
       this.hardKillCancelled();    // 8. 硬杀 cancelled
       this.handleOverflow();       // 9. overflow 处理
       this.recoverOverflow();      // 10. overflow 恢复
+      this.routeRetrieve();        // 10.5 失败回收路由：retrieve → on_dropped（方案乙）
       this.retryFailed();          // 11. 安全网：残留 failed → dropped
     } catch (err) {
       console.error("[orchestrator-plugin] patrol error:", err);
@@ -283,6 +286,28 @@ export class PatrolLoop {
         }
       }
     }
+  }
+
+  // ── 1.5 payload 临时文件清扫 ───────────────────────────
+
+  /**
+   * 删除 OPENRY_HOME/tmp/payloads/ 下超过 1 小时的残留文件。
+   * 主清理机制是 CLI 消费即删；本步兜底覆盖 CLI 崩溃/被杀场景。
+   */
+  private cleanupPayloadTemp(): void {
+    try {
+      const base = process.env.OPENRY_HOME ?? path.join(os.homedir(), ".openry");
+      const dir = path.join(base, "tmp", "payloads");
+      if (!fs.existsSync(dir)) return;
+      const cutoff = Date.now() - 60 * 60 * 1000;
+      for (const f of fs.readdirSync(dir)) {
+        const p = path.join(dir, f);
+        try {
+          const st = fs.statSync(p);
+          if (st.isFile() && st.mtimeMs < cutoff) fs.unlinkSync(p);
+        } catch { /* 单个文件失败不影响其余 */ }
+      }
+    } catch { /* 清扫失败非致命 */ }
   }
 
   // ── 启动时孤儿清理 ─────────────────────────────────────────
@@ -756,7 +781,11 @@ export class PatrolLoop {
 
         // ── 写入 DB（shell 已同步处理 payload，直接标记 validated 跳过 patrol 验证）──
         // Shell 不经过 validateCompleted()，直接进入 routeValidated() 路由
-        const dbStatus = status === "completed" ? "validated" : status;
+        let dbStatus = status === "completed" ? "validated" : status;
+        // 方案乙：shell 死亡路径（overflow fail / stdout 非 JSON abort）进 retrieve 漏斗
+        if (dbStatus === "dropped" && subStep.on_dropped) {
+          dbStatus = "retrieve";
+        }
         db.updateTaskStatus(this.db, runId, dbStatus, { validation_status: "passed" });
 
         // 同时更新 payload（updateTaskStatus 不写 payload）
@@ -1027,6 +1056,8 @@ export class PatrolLoop {
               onOutputOverflow: nextStep.on_output_overflow ?? "",
               onValidationFail: nextStep.on_validation_fail ?? "retry_current",
             });
+          } else if (this.routeToBigStep(task, target)) {
+            // Phase 3f: big_step 级跳转已处理（task 已标记 done）
           } else {
             console.log(`[orchestrator-plugin] Phase 3a: unknown route target '${target}' for ${runId}`);
             db.updateTaskStatus(this.db, runId, "failed", { validation_status: "failed" });
@@ -1130,6 +1161,10 @@ export class PatrolLoop {
             console.log(`[orchestrator-plugin] ${runId} routed to ${routingTarget} via validation_routing`);
             continue;
           }
+          // Phase 3f: 不是当前 Big Step 的 sub_step → 尝试 big_step 级跳转
+          if (this.routeToBigStep(task, routingTarget)) {
+            continue;
+          }
         } catch { /* fall through to normal routing */ }
       }
 
@@ -1199,6 +1234,100 @@ export class PatrolLoop {
     db.updateTaskStatus(this.db, task.run_id as string, "done");
   }
 
+  /**
+   * Phase 3f: 跨 big_step 路由跳转。
+   *
+   * target 形如 "big_step_name" 或 "big_step_name:sub_step_id"。
+   * 同一 workflow instance 内跳转——没有"子 workflow"概念。
+   *
+   * ① 找出目标 big_step 所属的 composition → 重写 workflow_instances.composition
+   *    → 完成后 advanceBigStep 沿该链继续推进
+   * ② 找不到所属 composition → 降级 standalone（composition 列 = big_step 名）
+   *    → 完成后 advanceBigStep 的 catch 标记 completed
+   *
+   * @returns true 表示已处理跳转；false 表示 target 不是有效 big_step
+   */
+  private routeToBigStep(
+    task: Record<string, unknown>,
+    target: string,
+  ): boolean {
+    const wfId = (task.workflow_instance_id as number) || 0;
+    if (!wfId) return false;
+
+    // 解析 target: "big_step" 或 "big_step:sub_step"
+    const colonIdx = target.indexOf(":");
+    const bigStepName = colonIdx >= 0 ? target.slice(0, colonIdx) : target;
+    const entrySubStepId = colonIdx >= 0 ? target.slice(colonIdx + 1) : "";
+
+    let targetBigStep: BigStep;
+    try {
+      targetBigStep = loadBigStep(bigStepName);
+    } catch {
+      return false; // 不是 big_step → 交给正常路由
+    }
+
+    const entrySubStep = entrySubStepId
+      ? getSubStepConfig(targetBigStep, entrySubStepId)
+      : getFirstSubStep(targetBigStep);
+    if (!entrySubStep) {
+      console.log(
+        `[orchestrator-plugin] Phase 3f: big_step '${bigStepName}' 无 sub_step '${entrySubStepId || "(第一个)"}'`,
+      );
+      return false;
+    }
+
+    // 找所属 composition（优先当前 instance 的 composition）；找不到 → 降级 standalone
+    const currentComp = (this.db.prepare(
+      "SELECT composition FROM workflow_instances WHERE id = ?",
+    ).get(wfId) as { composition: string } | undefined)?.composition ?? null;
+    const owningComp = findCompositionContaining(bigStepName, currentComp) ?? bigStepName;
+
+    // 重写上下文列（同一 instance）
+    this.db.prepare(
+      `UPDATE workflow_instances
+       SET composition = ?, current_big_step = ?, updated_at = datetime('now')
+       WHERE id = ?`,
+    ).run(owningComp, bigStepName, wfId);
+
+    // Enqueue 目标 sub_step（同一 instance）
+    const newRunId = randomUUID();
+    let parentPayload: Record<string, unknown> = {};
+    try {
+      parentPayload = JSON.parse((task.payload as string) || "{}");
+    } catch { /* empty */ }
+    const nextPayload = entrySubStep.inherit_payload ? parentPayload : {};
+    // 记录继承来源（蒸馏完成后 handleDistillComplete 靠它回写下游 queued step）
+    if (entrySubStep.inherit_payload) {
+      (nextPayload as Record<string, unknown>)._inherits_from_run_id = task.run_id;
+    }
+
+    db.enqueueNextSubStep(this.db, {
+      newRunId,
+      workflow: owningComp,
+      bigStepRef: bigStepName,
+      subStepId: entrySubStep.id,
+      stepId: entrySubStep.id,
+      payload: JSON.stringify(nextPayload),
+      workflowInstanceId: wfId,
+      maxToolCalls: entrySubStep.max_tool_calls ?? 10,
+      maxRetries: targetBigStep.max_retries ?? 0,
+      maxSubStepRetries: entrySubStep.max_sub_step_retries ?? 3,
+      maxOutputTokens: entrySubStep.max_output_tokens ?? 0,
+      onOutputOverflow: entrySubStep.on_output_overflow ?? "",
+      onValidationFail: entrySubStep.on_validation_fail ?? "retry_current",
+    });
+
+    // 当前 task 完成
+    db.updateTaskStatus(this.db, task.run_id as string, "done");
+
+    console.log(
+      `[orchestrator-plugin] Phase 3f: ${task.run_id} 跳转到 big_step '${bigStepName}'` +
+      (entrySubStepId ? `:${entrySubStepId}` : "") +
+      ` (composition='${owningComp}', wf_id=${wfId})`,
+    );
+    return true;
+  }
+
   private advanceBigStep(task: Record<string, unknown>): void {
     const wfId = task.workflow_instance_id as number;
     if (!wfId) return;
@@ -1224,9 +1353,18 @@ export class PatrolLoop {
           if (firstSub) {
             const newRunId = randomUUID();
             // Respect inherit_payload across big_step boundary
-            const crossPayload = firstSub.inherit_payload
-              ? ((task.payload as string) || "{}")
-              : "{}";
+            let crossPayload: string;
+            if (firstSub.inherit_payload) {
+              let cp: Record<string, unknown> = {};
+              try {
+                cp = JSON.parse((task.payload as string) || "{}");
+              } catch { /* keep empty */ }
+              // 记录继承来源（蒸馏完成后 handleDistillComplete 靠它回写下游 queued step）
+              cp._inherits_from_run_id = task.run_id;
+              crossPayload = JSON.stringify(cp);
+            } else {
+              crossPayload = "{}";
+            }
             db.enqueueNextSubStep(this.db, {
               newRunId,
               workflow: comp.name,
@@ -1252,7 +1390,12 @@ export class PatrolLoop {
           .run(wfId);
       }
     } catch {
-      // composition not found
+      // composition not found（standalone big_step 完成，或 composition YAML 缺失）
+      // 修复：不再静默卡 running，标记 completed
+      this.db.prepare(
+        "UPDATE workflow_instances SET status = 'completed', updated_at = datetime('now') WHERE id = ?",
+      ).run(wfId);
+      console.log(`[orchestrator-plugin] ${wfId} completed (composition not found — standalone big_step)`);
     }
   }
 
@@ -1414,6 +1557,100 @@ export class PatrolLoop {
     }
   }
 
+  // ── 10.5 失败回收路由：retrieve → on_dropped 目标（方案乙）──
+
+  /**
+   * 消费 status='retrieve' 的任务（失败终态、配了 on_dropped）。
+   * 目标解析对齐 validation_routing 优先级：
+   *   abort → 降级 dropped；同 big step sub_step id → enqueueNextSubStep；
+   *   big_step 名 / big_step:sub_step → routeToBigStep。
+   * 消费后原任务置 done（防重复路由）。末尾做实例收尾。
+   */
+  private routeRetrieve(): void {
+    const tasks = db.queryRetrieveTasks(this.db);
+    for (const task of tasks) {
+      const runId = task.run_id as string;
+      const bigStepRef = (task.big_step_ref as string) || "";
+      const subStepId = (task.sub_step_id as string) || "";
+
+      let target = "";
+      let bigStep: BigStep | undefined;
+      try {
+        bigStep = loadBigStep(bigStepRef);
+        const ss = getSubStepConfig(bigStep, subStepId);
+        target = ss?.on_dropped ?? "";
+      } catch { /* 保持空 */ }
+
+      if (!target || target === "abort") {
+        db.updateTaskStatus(this.db, runId, "dropped");
+        continue;
+      }
+
+      // ① 同 big step 内的 sub_step id
+      if (bigStep) {
+        const targetStep = getSubStepConfig(bigStep, target);
+        if (targetStep) {
+          this.enqueueNextSubStep(task, bigStep, targetStep);
+          console.log(
+            `[orchestrator-plugin] ${runId} retrieve-routed to sub_step '${target}' (same big step)`,
+          );
+          continue;
+        }
+      }
+
+      // ② 跨 big_step：big_step 名 / big_step:sub_step
+      if (this.routeToBigStep(task, target)) {
+        console.log(
+          `[orchestrator-plugin] ${runId} retrieve-routed to big_step '${target}'`,
+        );
+        continue;
+      }
+
+      // ③ 无效目标 → 降级 dropped
+      db.updateTaskStatus(this.db, runId, "dropped");
+      console.log(
+        `[orchestrator-plugin] ${runId} retrieve target '${target}' invalid → dropped`,
+      );
+    }
+
+    this.reapDeadInstances();
+  }
+
+  /**
+   * 实例收尾：running 且无活任务（in_progress/queued/validated/retrieve）→ failed。
+   * 修复 CLI 直接 dropped 的实例卡 running 的历史问题（实例 17/18/19）。
+   * 仅处理 1 分钟前创建的实例，避开 start 与首个 enqueue 之间的瞬时窗口。
+   */
+  private reapDeadInstances(): void {
+    const running = this.db.prepare(
+      `SELECT id FROM workflow_instances
+       WHERE status = 'running' AND created_at < datetime('now', '-1 minute')`,
+    ).all() as Array<{ id: number }>;
+    for (const { id } of running) {
+      const alive = this.db.prepare(
+        `SELECT COUNT(*) as cnt FROM task_state
+         WHERE workflow_instance_id = ?
+           AND status IN ('in_progress', 'queued', 'validated', 'retrieve')`,
+      ).get(id) as { cnt: number };
+      if (alive.cnt === 0) {
+        this.db.prepare(
+          `UPDATE workflow_instances SET status = 'failed', updated_at = datetime('now') WHERE id = ?`,
+        ).run(id);
+        const cleanup = this.db.prepare(
+          `UPDATE task_state SET status = 'cancelled' WHERE workflow_instance_id = ? AND status = 'queued'`,
+        ).run(id);
+        if (cleanup.changes > 0) {
+          console.log(
+            `[orchestrator-plugin] workflow ${id}: cancelled ${cleanup.changes} orphaned queued task(s)`,
+          );
+        }
+        console.log(
+          `[orchestrator-plugin] workflow ${id} marked failed (no alive sub_steps)`,
+        );
+      }
+    }
+  }
+
   // ── 11. 重试 failed — 安全网（CLI 已同步处理，这里只清理残留）───
 
   /**
@@ -1426,13 +1663,57 @@ export class PatrolLoop {
       .prepare("SELECT * FROM task_state WHERE status = 'failed'")
       .all() as Array<Record<string, unknown>>;
 
+    const affectedInstances = new Set<number>();
+
     for (const task of allFailed) {
       const runId = task.run_id as string;
-      // Safety net: CLI should have processed this; if still 'failed', drop it
-      db.updateTaskStatus(this.db, runId, "dropped");
-      console.log(
-        `[orchestrator-plugin] ${runId} dropped (safety net: CLI did not process failed state)`,
-      );
+      // 方案乙：检查 YAML on_dropped → retrieve；否则 dropped（现状）
+      let onDropped = "";
+      try {
+        const bigStep = loadBigStep((task.big_step_ref as string) || "");
+        const ss = getSubStepConfig(bigStep, (task.sub_step_id as string) || "");
+        onDropped = ss?.on_dropped ?? "";
+      } catch { /* 保持空 */ }
+      if (onDropped) {
+        db.updateTaskStatus(this.db, runId, "retrieve");
+        console.log(
+          `[orchestrator-plugin] ${runId} marked retrieve (safety net, on_dropped=${onDropped})`,
+        );
+      } else {
+        db.updateTaskStatus(this.db, runId, "dropped");
+        console.log(
+          `[orchestrator-plugin] ${runId} dropped (safety net: CLI did not process failed state)`,
+        );
+      }
+      if (task.workflow_instance_id) {
+        affectedInstances.add(task.workflow_instance_id as number);
+      }
+    }
+
+    // ── 收尾：关闭已无活 task 的 workflow ──
+    for (const wfId of affectedInstances) {
+      const alive = this.db.prepare(
+        `SELECT COUNT(*) as cnt FROM task_state
+         WHERE workflow_instance_id = ?
+           AND status IN ('in_progress', 'queued', 'validated', 'retrieve')`
+      ).get(wfId) as { cnt: number };
+
+      if (alive.cnt === 0) {
+        db.updateWorkflowInstanceStatus(this.db, wfId, "failed");
+        console.log(
+          `[orchestrator-plugin] workflow ${wfId} marked as failed (no alive sub_steps remaining)`,
+        );
+        // 同时清理该 workflow 下残留的 queued 任务
+        const cleanup = this.db.prepare(
+          `UPDATE task_state SET status = 'cancelled'
+           WHERE workflow_instance_id = ? AND status = 'queued'`
+        ).run(wfId);
+        if (cleanup.changes > 0) {
+          console.log(
+            `[orchestrator-plugin] workflow ${wfId}: cancelled ${cleanup.changes} orphaned queued task(s)`,
+          );
+        }
+      }
     }
   }
 

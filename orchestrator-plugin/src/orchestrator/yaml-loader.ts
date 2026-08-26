@@ -48,6 +48,8 @@ export type SubStep = {
   on_output_overflow?: string;
   // Phase 3a
   on_payload_missing?: string;
+  // 方案乙：失败终态 retrieve 路由（存在即开关，值即目标）
+  on_dropped?: string;
   validation_routing?: ValidationRoutingEntry[];
   // Phase 3b: prompt_blocks
   prompt_blocks?: PromptBlock[];
@@ -188,4 +190,47 @@ export function getNextSubStep(
 ): SubStep | undefined {
   if (route === "done" || route === "abort") return undefined;
   return getSubStepConfig(bigStep, route);
+}
+
+// ── Phase 3f: 跨 big_step 路由辅助 ────────────────────────────
+
+/**
+ * 列出 compositions/ 目录下所有 composition 名（字母序，保证确定性）。
+ */
+export function listCompositionNames(): string[] {
+  const configDir = getConfigDir();
+  const dir = path.join(configDir, "compositions");
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter((f) => f.endsWith(".yaml"))
+    .map((f) => f.slice(0, -".yaml".length))
+    .sort();
+}
+
+/**
+ * 查找包含指定 big_step ref 的 composition 名。
+ * 优先 preferred（当前 instance 的 composition），其次按字母序。
+ * 找不到返回 null → 调用方降级 standalone（composition 列写 big_step 名）。
+ */
+export function findCompositionContaining(
+  ref: string,
+  preferred?: string | null,
+): string | null {
+  const names = listCompositionNames();
+
+  if (preferred && names.includes(preferred)) {
+    try {
+      const comp = loadComposition(preferred);
+      if (comp.big_steps.some((bs) => bs.ref === ref)) return preferred;
+    } catch { /* 加载失败，继续扫描 */ }
+  }
+
+  for (const name of names) {
+    if (name === preferred) continue;
+    try {
+      const comp = loadComposition(name);
+      if (comp.big_steps.some((bs) => bs.ref === ref)) return name;
+    } catch { /* 加载失败，跳过 */ }
+  }
+  return null;
 }

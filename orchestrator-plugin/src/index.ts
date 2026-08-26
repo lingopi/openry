@@ -1,4 +1,4 @@
-import { execSync, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { Type } from "typebox";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { textResult } from "openclaw/plugin-sdk/tool-results";
@@ -34,34 +34,105 @@ const OPENRY_CLI = "openry";
 const _isWindows = process.platform === "win32";
 
 /**
- * Execute an openry CLI command.
- * Windows: spawnSync pwsh directly (bypasses cmd.exe and its broken quoting).
- * Unix: execSync (sh handles single quotes natively).
+ * Execute an openry CLI command asynchronously.
+ *
+ * Why async: the old implementation used execSync on the gateway main thread —
+ * any long command froze the whole gateway event loop (patrol included) for the
+ * full command duration.
+ * (see loop-engineering/failure-routing-model.md §5.1a, instance 35)
+ *
+ * Windows: spawn pwsh directly (bypasses cmd.exe and its broken quoting).
+ * Unix: shell:true preserves the previous execSync quoting semantics.
+ * Timeout: child killed at timeoutMs (SIGTERM → SIGKILL after 5s), rejects ETIMEDOUT.
+ * Output: aggregated up to 10MB (maxBuffer parity); overflow kills + rejects.
  */
-function execOpenry(cliArgs: string, env: Record<string, string | undefined>, timeoutMs: number): string {
-  if (_isWindows) {
-    const r = spawnSync("pwsh", [
-      "-NoProfile", "-NonInteractive", "-Command",
-      `${OPENRY_CLI} ${cliArgs}`,
-    ], {
-      env,
-      timeout: timeoutMs,
-      encoding: "utf-8",
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    if (r.error) throw r.error;
-    if (r.status !== 0) {
-      const err: any = new Error(`openry exited with code ${r.status}`);
-      err.stdout = r.stdout;
-      err.stderr = r.stderr;
-      throw err;
+function execOpenryAsync(
+  cliArgs: string,
+  env: Record<string, string | undefined>,
+  timeoutMs: number,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let child: ReturnType<typeof spawn>;
+    if (_isWindows) {
+      child = spawn("pwsh", [
+        "-NoProfile", "-NonInteractive", "-Command",
+        `${OPENRY_CLI} ${cliArgs}`,
+      ], { env, stdio: ["ignore", "pipe", "pipe"] });
+    } else {
+      child = spawn(`${OPENRY_CLI} ${cliArgs}`, {
+        env,
+        shell: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
     }
-    return r.stdout;
-  }
-  return execSync(
-    `${OPENRY_CLI} ${cliArgs}`,
-    { env, timeout: timeoutMs, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 },
-  );
+
+    const MAX_OUTPUT = 10 * 1024 * 1024;
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    let overflowed = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch { /* gone */ }
+      setTimeout(() => {
+        if (!settled) { try { child.kill("SIGKILL"); } catch { /* gone */ } }
+      }, 5000);
+    }, timeoutMs);
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+      if (stdout.length > MAX_OUTPUT) {
+        overflowed = true;
+        clearTimeout(timer);
+        try { child.kill("SIGKILL"); } catch { /* gone */ }
+      }
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+      if (stderr.length > MAX_OUTPUT) {
+        overflowed = true;
+        clearTimeout(timer);
+        try { child.kill("SIGKILL"); } catch { /* gone */ }
+      }
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      if (overflowed) {
+        const err: any = new Error(`openry output exceeded ${MAX_OUTPUT} bytes (maxBuffer)`);
+        err.stdout = stdout.slice(0, MAX_OUTPUT);
+        err.stderr = stderr.slice(0, MAX_OUTPUT);
+        reject(err);
+        return;
+      }
+      if (timedOut) {
+        const err: any = new Error(`spawn ${OPENRY_CLI} ETIMEDOUT (${timeoutMs}ms)`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      if (code !== 0) {
+        const err: any = new Error(`${OPENRY_CLI} exited with code ${code} (signal=${signal ?? "none"})`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
 }
 
 // ── PATH 构建 (跨平台) ──────────────────────────────────────────
@@ -70,6 +141,119 @@ import { buildPath as _buildPath } from "./orchestrator/spawn-helper.js";
 
 function buildPath(): string {
   return _buildPath();
+}
+
+// ── payload 传输（argv 直传 / @file 双通道，修复单引号炸裂）──
+
+/** argv 直传阈值：超过此字节数走 @file 通道 */
+const PAYLOAD_ARGV_LIMIT = 16 * 1024;
+
+function payloadTempDir(): string {
+  const base = process.env.OPENRY_HOME ?? path.join(os.homedir(), ".openry");
+  return path.join(base, "tmp", "payloads");
+}
+
+/** 原子写入临时 payload 文件，返回路径 */
+function writePayloadTemp(jsonText: string): string {
+  const dir = payloadTempDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const tmp = path.join(dir, `.tmp-${stamp}`);
+  const final = path.join(dir, `payload-${stamp}.json`);
+  fs.writeFileSync(tmp, jsonText, "utf-8");
+  fs.renameSync(tmp, final);
+  return final;
+}
+
+/**
+ * argv 直传执行 openry CLI：参数数组零 shell 解析（payload 任意字符安全）。
+ * Windows：无真正 argv 数组，走 pwsh -Command（调用方应使用 @file 短参数）。
+ */
+function execOpenryArgv(
+  args: string[],
+  env: Record<string, string | undefined>,
+  timeoutMs: number,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let child: ReturnType<typeof spawn>;
+    if (_isWindows) {
+      const cmdLine = `${OPENRY_CLI} ${args
+        .map((a) => (a.includes(" ") ? `'${a}'` : a))
+        .join(" ")}`;
+      child = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-Command", cmdLine], {
+        env, stdio: ["ignore", "pipe", "pipe"],
+      });
+    } else {
+      child = spawn(OPENRY_CLI, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    }
+
+    const MAX_OUTPUT = 10 * 1024 * 1024;
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch { /* gone */ }
+      setTimeout(() => {
+        if (!settled) { try { child.kill("SIGKILL"); } catch { /* gone */ } }
+      }, 5000);
+    }, timeoutMs);
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+      if (stdout.length > MAX_OUTPUT) {
+        clearTimeout(timer);
+        try { child.kill("SIGKILL"); } catch { /* gone */ }
+      }
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      if (timedOut) {
+        const err: any = new Error(`spawn ${OPENRY_CLI} ETIMEDOUT (${timeoutMs}ms)`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      if (code !== 0) {
+        const err: any = new Error(`${OPENRY_CLI} exited with code ${code}`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+/** openry_status 提交通道：小 payload argv 直传；大 payload / Windows 走 @file */
+async function submitStatus(opts: {
+  status: string;
+  payloadJson: string;
+  env: Record<string, string | undefined>;
+}): Promise<string> {
+  const bytes = Buffer.byteLength(opts.payloadJson, "utf-8");
+  if (_isWindows || bytes > PAYLOAD_ARGV_LIMIT) {
+    const tmpPath = writePayloadTemp(opts.payloadJson);
+    return execOpenryArgv(["--status", opts.status, "--payload", `@${tmpPath}`], opts.env, 15_000);
+  }
+  return execOpenryArgv(["--status", opts.status, "--payload", opts.payloadJson], opts.env, 15_000);
 }
 
 // ── shell 转义 (跨平台) ─────────────────────────────────────────
@@ -85,6 +269,7 @@ function escapeShell(cmd: string): string {
 // ── trusted policy ─────────────────────────────────────────────
 
 import { evaluateOpenryExecGate } from "./tools/trusted-policy.js";
+import { analysisSourcesExecute, type AnalysisSourcesParams } from "./tools/analysis-sources.js";
 
 // ── Phase 3c: command policy ──────────────────────────────────
 
@@ -200,7 +385,7 @@ const plugin = {
               OPENRY_AGENT_ID: agent_id,
               OPENRY_SESSION_KEY: sessionKey,
             };
-            const stdout = execOpenry(
+            const stdout = await execOpenryAsync(
               `-c "${escapeShell(command)}"`,
               execEnv,
               orchestratorConfig.commandTimeoutMs,
@@ -262,11 +447,11 @@ const plugin = {
               OPENRY_AGENT_ID: agent_id,
               OPENRY_SESSION_KEY: sessionKey,
             };
-            const stdout = execOpenry(
-              `--status ${status} --payload '${payloadJson}'`,
-              execEnv,
-              10_000,
-            );
+            const stdout = await submitStatus({
+              status,
+              payloadJson,
+              env: execEnv,
+            });
             return textResult(stdout.trim() || `Status updated: ${status}`, null);
           } catch (err: unknown) {
             const execErr = err as { stdout?: string; stderr?: string; message?: string };
@@ -412,6 +597,38 @@ const plugin = {
           } catch (err) {
             return textResult(`openry_knowledge_query error: ${String(err)}`, null);
           }
+        },
+      };
+    });
+
+    // ── openry_analysis_sources（失败取证：loop_analyze_failure 自助调用）──
+    api.registerTool((ctx: OpenClawPluginToolContext) => {
+      return {
+        name: "openry_analysis_sources",
+        label: "OpenRY Analysis Sources",
+        description:
+          "Collect failure evidence for the failed task in the current loop iteration. " +
+          "The failed task's run_id is resolved automatically (you don't need to pass it). " +
+          "Sources: verdict (L-1), payload (L0), commands_log (L1), transcript (L2), " +
+          "trajectory_dynamic (L3), trajectory_full (L4). " +
+          "Numeric aliases: \"0\"=verdict, \"1\"=payload, \"2\"=commands_log, " +
+          "\"3\"=transcript, \"4\"=trajectory_dynamic.",
+        parameters: Type.Object({
+          sources: Type.Optional(Type.Array(Type.String(), {
+            description: "Layers to fetch. Default [\"auto\"] = ladder order until budget.",
+          })),
+          budget_tokens: Type.Optional(Type.Number({
+            description: "Token budget for content loading. Default 12000 (auto covers through trajectory_dynamic).",
+          })),
+          run_id: Type.Optional(Type.String({
+            description: "Optional override of the failed task run_id. Invalid values fall back to implicit resolution.",
+          })),
+        }),
+        async execute(_toolCallId: string, params: unknown) {
+          return await analysisSourcesExecute(
+            params as AnalysisSourcesParams,
+            ctx,
+          );
         },
       };
     });

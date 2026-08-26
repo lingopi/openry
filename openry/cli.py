@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 # ── Phase 2: in-process cache for cancel_requested ──
@@ -354,6 +355,11 @@ def _evaluate_routing_sync(run_id: str, payload: dict, step_config: dict) -> dic
 # ──────────────────────────────────────────────
 
 
+def _final_failure_status(step_config: dict) -> str:
+    """失败终态（方案乙）：配置了 on_dropped 的任务 → retrieve；否则 dropped（现状）。"""
+    return "retrieve" if step_config.get("on_dropped") else "dropped"
+
+
 def _handle_failed_retry(run_id: str, step_config: dict, retry_count: int, conn) -> dict:
     """Determine the outcome of --status failed synchronously.
 
@@ -384,13 +390,13 @@ def _handle_failed_retry(run_id: str, step_config: dict, retry_count: int, conn)
             "acknowledged": True,
         }
 
-    # Budget exhausted or on_failure=abort → permanently dropped
+    # Budget exhausted or on_failure=abort → dropped；配置 on_dropped → retrieve（方案乙）
     conn.execute(
         """UPDATE task_state
-           SET status = 'dropped',
+           SET status = ?,
                updated_at = datetime('now')
            WHERE run_id = ?""",
-        (run_id,),
+        (_final_failure_status(step_config), run_id),
     )
     reason = "所有重试次数已用尽" if on_failure == "retry" else "on_failure=abort，任务终止"
     return {
@@ -530,6 +536,35 @@ def cmd_execute(args: argparse.Namespace) -> None:
     print(json.dumps(agent_response, ensure_ascii=False))
 
 
+def _resolve_payload_arg(payload_arg: str | None) -> str | None:
+    """解析 --payload 值：支持 @path 语法（读文件内容，消费即删）。
+
+    @path 仅允许 OPENRY_HOME/tmp/payloads/ 目录下的文件（由 plugin 工具写入）。
+    返回 payload JSON 文本。
+    """
+    if not payload_arg or not payload_arg.startswith("@"):
+        return payload_arg
+    from pathlib import Path
+    raw_path = payload_arg[1:]
+    target = Path(raw_path).expanduser().resolve()
+    home = os.environ.get("OPENRY_HOME") or str(Path.home() / ".openry")
+    allowed = (Path(home) / "tmp" / "payloads").resolve()
+    if not str(target).startswith(str(allowed) + os.sep):
+        raise ValueError(f"@payload 路径不在允许目录: {raw_path}")
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise ValueError(f"@payload 文件不存在: {raw_path}")
+    except Exception as e:
+        raise ValueError(f"@payload 读取失败: {e}")
+    # 消费即删（残留由 patrol cleanupPayloadTemp 兜底清扫）
+    try:
+        target.unlink()
+    except OSError:
+        pass
+    return text
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Handle the --status path with sync validation/retry and session termination.
 
@@ -555,6 +590,12 @@ def cmd_status(args: argparse.Namespace) -> None:
     payload_str = "{}"
     payload_dict: dict = {}
     if args.payload:
+        # 新增：支持 @file payload（消费即删，绕开 shell 引号限制）
+        try:
+            args.payload = _resolve_payload_arg(args.payload)
+        except ValueError as e:
+            print(json.dumps({"error": str(e)}))
+            sys.exit(1)
         try:
             parsed = json.loads(args.payload)
             if not isinstance(parsed, dict):
@@ -664,9 +705,9 @@ def cmd_status(args: argparse.Namespace) -> None:
                         }
                     elif routing_target == "abort":
                         conn.execute(
-                            "UPDATE task_state SET status = 'dropped', validation_status = 'failed',"
+                            "UPDATE task_state SET status = ?, validation_status = 'failed',"
                             " updated_at = datetime('now') WHERE run_id = ?",
-                            (run_id,),
+                            (_final_failure_status(step_config), run_id),
                         )
                         result = {
                             "status": "completed", "action": "dropped",
@@ -693,9 +734,9 @@ def cmd_status(args: argparse.Namespace) -> None:
                             }
                         else:
                             conn.execute(
-                                "UPDATE task_state SET status = 'dropped', validation_status = 'failed',"
+                                "UPDATE task_state SET status = ?, validation_status = 'failed',"
                                 " updated_at = datetime('now') WHERE run_id = ?",
-                                (run_id,),
+                                (_final_failure_status(step_config), run_id),
                             )
                             result = {
                                 "status": "completed", "action": "dropped",
@@ -754,11 +795,11 @@ def cmd_status(args: argparse.Namespace) -> None:
                 else:
                     conn.execute(
                         """UPDATE task_state
-                           SET status = 'dropped',
+                           SET status = ?,
                                validation_status = 'failed',
                                updated_at = datetime('now')
                            WHERE run_id = ?""",
-                        (run_id,),
+                        (_final_failure_status(step_config), run_id),
                     )
                     result = {
                         "status": "completed",
@@ -1235,6 +1276,290 @@ def cmd_tools_sync(args: argparse.Namespace) -> None:
         print("✓ All configs up to date.")
 
 
+def _wf_fail(result: dict, message: str) -> None:
+    """Print JSON failure result and exit 1."""
+    result["written"] = False
+    result["error"] = message
+    print(json.dumps(result, ensure_ascii=False))
+    sys.exit(1)
+
+
+def cmd_write_file(args) -> None:
+    """Atomic file writer for kind:shell write steps.
+
+    Content source: --stdin (recommended) / --content / --from-payload.
+    Success JSON: {"written": true, "path", "bytes", "lines", "mode", "source",
+                   "verified": {...}?}
+    Failure: JSON with "error", exit 1. Verification failure keeps the file
+    (diagnosable artifact), reports verified=false and exits 1.
+    """
+    result: dict = {"written": False}
+
+    # ── ① Resolve content ──
+    if args.stdin:
+        content = sys.stdin.read()
+        source = "stdin"
+    elif args.from_payload:
+        run_id = os.environ.get("OPENRY_RUN_ID")
+        if not run_id:
+            _wf_fail(result, "OPENRY_RUN_ID not set; --from-payload requires an active run")
+        from .db import get_task_state
+        state = get_task_state(run_id)
+        if not state:
+            _wf_fail(result, f"no task_state row for run_id={run_id}")
+        try:
+            payload = json.loads(state.get("payload") or "{}")
+        except Exception:
+            _wf_fail(result, "task_state payload is not valid JSON")
+        if args.from_payload not in payload:
+            _wf_fail(result, f"payload key '{args.from_payload}' not found")
+        raw = payload[args.from_payload]
+        content = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        source = f"payload.{args.from_payload}"
+    else:
+        content = args.content or ""
+        source = "content"
+
+    if args.ensure_newline and content and not content.endswith("\n"):
+        content += "\n"
+
+    path = os.path.abspath(args.path)
+    exists = os.path.exists(path)
+
+    # ── ② Mode guard ──
+    if args.mode == "create" and exists and not args.force:
+        _wf_fail(result, f"file already exists: {path} (use --force to overwrite)")
+
+    # ── ③ Atomic write (temp + rename, parents auto-created) ──
+    parent = os.path.dirname(path) or "."
+    try:
+        os.makedirs(parent, exist_ok=True)
+    except Exception as e:
+        _wf_fail(result, f"cannot create parent dir {parent}: {e}")
+
+    combined = content
+    if args.mode == "append" and exists:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                combined = f.read() + content
+        except Exception as e:
+            _wf_fail(result, f"cannot read existing file for append: {e}")
+
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=parent, prefix=".openry-write-", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(combined)
+        os.replace(tmp_path, path)
+        tmp_path = None
+    except Exception as e:
+        _wf_fail(result, f"write failed: {e}")
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    # ── ④ Result metadata ──
+    result["written"] = True
+    result["path"] = path
+    result["bytes"] = len(content.encode("utf-8"))
+    result["lines"] = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+    result["mode"] = args.mode
+    result["source"] = source
+
+    # ── ⑤ Post-write verification ──
+    if args.verify == "yaml":
+        try:
+            import yaml as _yaml
+            _yaml.safe_load(combined)
+            result["verified"] = {"yaml": True}
+        except Exception as e:
+            result["verified"] = {"yaml": False}
+            _wf_fail(result, f"yaml verification failed (file kept): {e}")
+    elif args.verify == "json":
+        try:
+            json.loads(combined)
+            result["verified"] = {"json": True}
+        except Exception as e:
+            result["verified"] = {"json": False}
+            _wf_fail(result, f"json verification failed (file kept): {e}")
+
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def cmd_extract_step(args) -> None:
+    """硬代码：指针定位失败任务 + 从 workflow YAML 截取该 sub_step 现状块。
+
+    输出 JSON：{failed_run_id, failed_step_id, step_yaml, block_start_line,
+    block_end_line, path}。step_yaml 是失败步在目标文件里的原始块文本，
+    agent 基于它修改而非凭空重写。
+    """
+    import re as _re
+    from .db import get_task_state
+
+    # ── ① 指针 → 失败任务 ──
+    state = get_task_state(args.from_run_id)
+    if not state:
+        print(json.dumps({"error": f"from-run-id {args.from_run_id} 无 task_state 行"}))
+        sys.exit(1)
+    step_id = state.get("sub_step_id")
+    if not step_id:
+        print(json.dumps({"error": "task 行缺 sub_step_id"}))
+        sys.exit(1)
+
+    # ── ② 读目标文件，按 - id: 行扫描截取块（与 patch-yaml 同款定位）──
+    path = os.path.abspath(args.path)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            original = f.read()
+    except FileNotFoundError:
+        print(json.dumps({"error": f"文件不存在: {path}"}))
+        sys.exit(1)
+    except Exception as e:
+        print(json.dumps({"error": f"读取失败: {e}"}))
+        sys.exit(1)
+
+    lines = original.splitlines()
+    start = None
+    end = len(lines)
+    for i, line in enumerate(lines):
+        if _re.match(r"^\s*-\s+id\s*:\s*(\S+)\s*$", line):
+            if _re.match(r"^\s*-\s+id\s*:\s*" + _re.escape(step_id) + r"\s*$", line):
+                start = i
+            elif start is not None:
+                end = i
+                break
+    if start is None:
+        print(json.dumps({"error": f"step-id '{step_id}' 在 {path} 中不存在"}))
+        sys.exit(1)
+
+    print(json.dumps({
+        "failed_run_id": args.from_run_id,
+        "failed_step_id": step_id,
+        "step_yaml": "\n".join(lines[start:end]),
+        "block_start_line": start + 1,
+        "block_end_line": end,
+        "path": path,
+    }, ensure_ascii=False))
+
+
+def cmd_patch_yaml(args) -> None:
+    """修复半径控制：只替换指定 sub_step 块，其余字节级不动。"""
+    import re as _re
+    result: dict = {"patched": False}
+
+    # ── ① 新块文本：--step-yaml > stdin ──
+    if args.step_yaml is not None:
+        block_text = args.step_yaml
+    elif not sys.stdin.isatty():
+        block_text = sys.stdin.read()
+    else:
+        _wf_fail(result, "需要 --step-yaml 或 stdin 提供新块文本")
+
+    block_lines = block_text.splitlines()
+    if not block_lines:
+        _wf_fail(result, "新块文本为空")
+
+    # ── ② 新块首行必须是 - id: xxx，且 id 与 --step-id 一致 ──
+    m = _re.match(r"^\s*-\s+id\s*:\s*(\S+)\s*$", block_lines[0])
+    if not m:
+        _wf_fail(result, f"新块首行必须是 '- id: <id>'，实际: {block_lines[0][:60]!r}")
+    block_id = m.group(1)
+    if block_id != args.step_id:
+        _wf_fail(result, f"新块 id '{block_id}' 与 --step-id '{args.step_id}' 不一致")
+
+    # ── ③ 失败任务一致性硬校验（不信任 agent 报的 step-id）──
+    if not args.skip_id_check and args.from_run_id:
+        from .db import get_task_state
+        state = get_task_state(args.from_run_id)
+        failed_step = state.get("sub_step_id") if state else None
+        if not failed_step:
+            _wf_fail(result, f"from-run-id {args.from_run_id} 无 task_state 行")
+        if failed_step != args.step_id:
+            _wf_fail(result, f"step-id '{args.step_id}' 与失败任务 '{failed_step}' 不一致，拒绝越权修改")
+
+    # ── ④ 读原文件并定位目标块 ──
+    path = os.path.abspath(args.path)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            original = f.read()
+    except FileNotFoundError:
+        _wf_fail(result, f"文件不存在: {path}")
+    except Exception as e:
+        _wf_fail(result, f"读取失败: {e}")
+
+    lines = original.splitlines()
+    start = None
+    end = len(lines)
+    for i, line in enumerate(lines):
+        if _re.match(r"^\s*-\s+id\s*:\s*(\S+)\s*$", line):
+            if _re.match(r"^\s*-\s+id\s*:\s*" + _re.escape(args.step_id) + r"\s*$", line):
+                start = i
+            elif start is not None:
+                end = i
+                break
+    if start is None:
+        _wf_fail(result, f"step-id '{args.step_id}' 在原 YAML 中不存在")
+
+    # ── ⑤ 缩进对齐：新块按「首行缩进」为基准，相对缩进平移 ──
+    orig_indent = len(lines[start]) - len(lines[start].lstrip())
+    block_indent = len(block_lines[0]) - len(block_lines[0].lstrip())
+    new_indented: list[str] = []
+    for ln in block_lines:
+        stripped = ln.lstrip()
+        if not stripped:
+            new_indented.append("")
+        else:
+            rel = (len(ln) - len(ln.lstrip())) - block_indent
+            if rel < 0:
+                rel = 0
+            new_indented.append(" " * (orig_indent + rel) + stripped)
+
+    new_text = "\n".join(lines[:start] + new_indented + lines[end:])
+    if not new_text.endswith("\n"):
+        new_text += "\n"
+
+    # ── ⑥ 整体校验：合法 YAML + 目标 id 仍存在 ──
+    try:
+        import yaml as _yaml
+        parsed = _yaml.safe_load(new_text)
+        if not isinstance(parsed, dict) or not parsed.get("sub_steps"):
+            _wf_fail(result, "patch 后不是合法 workflow（缺 sub_steps）")
+        ids = [s.get("id") for s in parsed["sub_steps"] if isinstance(s, dict)]
+        if args.step_id not in ids:
+            _wf_fail(result, f"patch 后 sub_steps 中找不到 id '{args.step_id}'")
+    except Exception as e:
+        _wf_fail(result, f"patch 后 YAML 校验失败（未写盘）: {e}")
+
+    # ── ⑦ 原子写回 ──
+    parent = os.path.dirname(path) or "."
+    import tempfile as _tempfile
+    tmp_path = None
+    try:
+        fd, tmp_path = _tempfile.mkstemp(dir=parent, prefix=".openry-patch-", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(new_text)
+        os.replace(tmp_path, path)
+        tmp_path = None
+    except Exception as e:
+        _wf_fail(result, f"写盘失败: {e}")
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    result["patched"] = True
+    result["step_id"] = args.step_id
+    result["replaced_lines"] = end - start
+    result["unchanged_lines"] = len(lines) - (end - start)
+    result["path"] = path
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def _detect_shell_rc() -> Path:
     """Detect the user's shell RC file path."""
     from pathlib import Path
@@ -1313,6 +1638,76 @@ def main() -> None:
         )
         tools_args = tools_parser.parse_args(sys.argv[3:])
         cmd_tools_sync(tools_args)
+        return
+
+    # Route 'patch-yaml' subcommand — 修复半径控制：只替换指定 sub_step 块
+    if len(sys.argv) > 1 and sys.argv[1] == "patch-yaml":
+        pt_parser = argparse.ArgumentParser(
+            prog="openry patch-yaml",
+            description=(
+                "Surgically replace ONE sub_step block in a workflow YAML. "
+                "New block text from --step-yaml (or stdin if omitted). "
+                "Hard-code guards: step must exist; step must equal the failed task's "
+                "step_id (via --from-run-id pointer); result must stay valid YAML. "
+                "Only the target block's lines are replaced, everything else byte-identical."
+            ),
+        )
+        pt_parser.add_argument("--path", required=True, help="Target workflow YAML path")
+        pt_parser.add_argument("--step-id", required=True, help="sub_step id to replace")
+        pt_parser.add_argument("--step-yaml", type=str, default=None,
+                               help="New block text (default: read from stdin)")
+        pt_parser.add_argument("--from-run-id", type=str, default=None,
+                               help="Failed task run_id：硬校验 step-id 与失败任务一致")
+        pt_parser.add_argument("--skip-id-check", action="store_true",
+                               help="跳过失败任务一致性校验（仅手动调试用）")
+        pt_args = pt_parser.parse_args(sys.argv[2:])
+        cmd_patch_yaml(pt_args)
+        return
+
+    # Route 'write-file' subcommand — canonical file writer for kind:shell write steps
+    if len(sys.argv) > 1 and sys.argv[1] == "write-file":
+        wf_parser = argparse.ArgumentParser(
+            prog="openry write-file",
+            description=(
+                "Atomic file writer for workflow shell steps. "
+                "Content from --stdin / --content / --from-payload (own task_state payload). "
+                "Prints JSON result on stdout; exit 0 on success, 1 on failure."
+            ),
+        )
+        wf_parser.add_argument("--path", required=True, help="Target file path (absolute recommended)")
+        src_group = wf_parser.add_mutually_exclusive_group(required=True)
+        src_group.add_argument("--stdin", action="store_true", help="Read content from stdin (recommended for payload interpolation)")
+        src_group.add_argument("--content", type=str, default=None, help="Literal content (small sizes only)")
+        src_group.add_argument(
+            "--from-payload", type=str, default=None, metavar="KEY",
+            help="Read content from own task_state payload key (requires OPENRY_RUN_ID)",
+        )
+        wf_parser.add_argument("--mode", choices=["create", "append"], default="create",
+                               help="create (default): fail if exists without --force; append: append to existing")
+        wf_parser.add_argument("--force", action="store_true", help="Overwrite existing file (create mode)")
+        wf_parser.add_argument("--verify", choices=["yaml", "json", "none"], default="none",
+                               help="Post-write syntax check")
+        wf_parser.add_argument("--ensure-newline", action="store_true", help="Append trailing newline if missing")
+        wf_args = wf_parser.parse_args(sys.argv[2:])
+        cmd_write_file(wf_args)
+        return
+
+    # Route 'extract-step' subcommand — 硬代码截取失败 sub_step 现状块
+    if len(sys.argv) > 1 and sys.argv[1] == "extract-step":
+        es_parser = argparse.ArgumentParser(
+            prog="openry extract-step",
+            description=(
+                "Hard-code: resolve the failed task from the routing pointer "
+                "(_inherits_from_run_id, first hop only) and extract that "
+                "sub_step's current YAML block from the target workflow file. "
+                "Outputs failed_run_id / failed_step_id / step_yaml JSON."
+            ),
+        )
+        es_parser.add_argument("--path", required=True, help="Target workflow YAML path")
+        es_parser.add_argument("--from-run-id", required=True,
+                               help="Routing pointer run_id (_inherits_from_run_id)")
+        es_args = es_parser.parse_args(sys.argv[2:])
+        cmd_extract_step(es_args)
         return
 
     # Default mode: -c or --status (Phase 1/2 backward compatible)

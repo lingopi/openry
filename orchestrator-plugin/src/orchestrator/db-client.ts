@@ -37,6 +37,19 @@ export function queryQueuedTasks(
     .all(limit) as Array<Record<string, unknown>>;
 }
 
+/**
+ * 查询 status='retrieve' 的任务（失败终态，配置了 on_dropped，待回收路由）。
+ */
+export function queryRetrieveTasks(
+  db: Database.Database,
+): Array<Record<string, unknown>> {
+  return db
+    .prepare(
+      `SELECT * FROM task_state WHERE status = 'retrieve' ORDER BY created_at ASC`,
+    )
+    .all() as Array<Record<string, unknown>>;
+}
+
 export function queryTimedOutTasks(
   db: Database.Database,
 ): Array<{ run_id: string }> {

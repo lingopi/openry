@@ -101,75 +101,88 @@ def _api_list_compositions(handler, query: dict) -> None:
         limit = per_page
         offset = (page - 1) * per_page
 
-    # Total count for pagination
-    if status_filter:
-        total = conn.execute(
-            "SELECT COUNT(*) FROM workflow_instances WHERE status = ?", (status_filter,)
-        ).fetchone()[0]
-        rows = conn.execute(
-            "SELECT id, composition, status, current_big_step, big_step_started_at, "
-            "timeout_minutes, created_at, updated_at "
-            "FROM workflow_instances WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (status_filter, limit, offset),
-        ).fetchall()
-    else:
-        total = conn.execute("SELECT COUNT(*) FROM workflow_instances").fetchone()[0]
-        rows = conn.execute(
-            "SELECT id, composition, status, current_big_step, big_step_started_at, "
-            "timeout_minutes, created_at, updated_at "
-            "FROM workflow_instances ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        ).fetchall()
+    try:
+        # Total count for pagination
+        if status_filter:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM workflow_instances WHERE status = ?", (status_filter,)
+            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT id, composition, status, current_big_step, big_step_started_at, "
+                "timeout_minutes, created_at, updated_at "
+                "FROM workflow_instances WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (status_filter, limit, offset),
+            ).fetchall()
+        else:
+            total = conn.execute("SELECT COUNT(*) FROM workflow_instances").fetchone()[0]
+            rows = conn.execute(
+                "SELECT id, composition, status, current_big_step, big_step_started_at, "
+                "timeout_minutes, created_at, updated_at "
+                "FROM workflow_instances ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
 
-    cols = ["id", "composition", "status", "current_big_step",
-            "big_step_started_at", "timeout_minutes", "created_at", "updated_at"]
-    conn.close()
-    _send_json(handler, {
-        "compositions": [dict(zip(cols, r)) for r in rows],
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": max(1, (total + per_page - 1) // per_page),
-    })
+        cols = ["id", "composition", "status", "current_big_step",
+                "big_step_started_at", "timeout_minutes", "created_at", "updated_at"]
+        _send_json(handler, {
+            "compositions": [dict(zip(cols, r)) for r in rows],
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": max(1, (total + per_page - 1) // per_page),
+        })
+    except Exception:
+        _send_json(handler, {
+            "compositions": [],
+            "total": 0,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": 1,
+        })
+    finally:
+        conn.close()
 
 
 def _api_get_composition(handler, composition_id: str) -> None:
     conn = _get_conn()
     conn.row_factory = None
-    row = conn.execute(
-        "SELECT id, composition, status, current_big_step, big_step_started_at, "
-        "timeout_minutes, created_at, updated_at "
-        "FROM workflow_instances WHERE id = ?", (composition_id,)
-    ).fetchone()
-    if not row:
-        conn.close()
-        _send_error(handler, f"Composition {composition_id} not found", 404)
-        return
-    cols = ["id", "composition", "status", "current_big_step",
-            "big_step_started_at", "timeout_minutes", "created_at", "updated_at"]
-    comp = dict(zip(cols, row))
+    try:
+        row = conn.execute(
+            "SELECT id, composition, status, current_big_step, big_step_started_at, "
+            "timeout_minutes, created_at, updated_at "
+            "FROM workflow_instances WHERE id = ?", (composition_id,)
+        ).fetchone()
+        if not row:
+            _send_error(handler, f"Composition {composition_id} not found", 404)
+            return
+        cols = ["id", "composition", "status", "current_big_step",
+                "big_step_started_at", "timeout_minutes", "created_at", "updated_at"]
+        comp = dict(zip(cols, row))
 
-    task_rows = conn.execute(
-        "SELECT ts.run_id, ts.workflow, ts.step_id, ts.sub_step_id, ts.status, ts.payload, "
-        "ts.big_step_ref, ts.big_step_retry_count, ts.max_retries, ts.sub_step_retry_count, "
-        "ts.max_sub_step_retries, ts.max_tool_calls, ts.validation_status, ts.cancel_requested, "
-        "ts.output_overflow, ts.created_at, ts.updated_at, "
-        "COALESCE(cl.call_count, 0) as tool_calls "
-        "FROM task_state ts "
-        "LEFT JOIN ("
-        "  SELECT run_id, COUNT(*) as call_count FROM commands_log GROUP BY run_id"
-        ") cl ON ts.run_id = cl.run_id "
-        "WHERE ts.workflow_instance_id = ? ORDER BY ts.created_at ASC",
-        (composition_id,),
-    ).fetchall()
-    task_cols = ["run_id", "workflow", "step_id", "sub_step_id", "status", "payload",
-                 "big_step_ref", "big_step_retry_count", "max_retries",
-                 "sub_step_retry_count", "max_sub_step_retries", "max_tool_calls",
-                 "validation_status", "cancel_requested", "output_overflow",
-                 "created_at", "updated_at", "tool_calls"]
-    comp["steps"] = [dict(zip(task_cols, t)) for t in task_rows]
-    conn.close()
-    _send_json(handler, {"composition": comp})
+        task_rows = conn.execute(
+            "SELECT ts.run_id, ts.workflow, ts.step_id, ts.sub_step_id, ts.status, ts.payload, "
+            "ts.big_step_ref, ts.big_step_retry_count, ts.max_retries, ts.sub_step_retry_count, "
+            "ts.max_sub_step_retries, ts.max_tool_calls, ts.validation_status, ts.cancel_requested, "
+            "ts.output_overflow, ts.created_at, ts.updated_at, "
+            "COALESCE(cl.call_count, 0) as tool_calls "
+            "FROM task_state ts "
+            "LEFT JOIN ("
+            "  SELECT run_id, COUNT(*) as call_count FROM commands_log GROUP BY run_id"
+            ") cl ON ts.run_id = cl.run_id "
+            "WHERE ts.workflow_instance_id = ? ORDER BY ts.created_at ASC",
+            (composition_id,),
+        ).fetchall()
+        task_cols = ["run_id", "workflow", "step_id", "sub_step_id", "status", "payload",
+                     "big_step_ref", "big_step_retry_count", "max_retries",
+                     "sub_step_retry_count", "max_sub_step_retries", "max_tool_calls",
+                     "validation_status", "cancel_requested", "output_overflow",
+                     "created_at", "updated_at", "tool_calls"]
+        comp["steps"] = [dict(zip(task_cols, t)) for t in task_rows]
+        _send_json(handler, {"composition": comp})
+    except Exception as e:
+        _send_error(handler, f"Internal error: {e}", 500)
+    finally:
+        conn.close()
 
 
 def _api_get_payload(handler, composition_id: str) -> None:
@@ -255,30 +268,42 @@ def _api_list_workflows(handler) -> None:
 
 def _api_metrics(handler) -> None:
     conn = _get_conn()
-    total = conn.execute("SELECT COUNT(*) FROM workflow_instances").fetchone()[0]
-    running = conn.execute(
-        "SELECT COUNT(*) FROM workflow_instances WHERE status = 'running'"
-    ).fetchone()[0]
-    completed = conn.execute(
-        "SELECT COUNT(*) FROM workflow_instances WHERE status = 'completed'"
-    ).fetchone()[0]
-    failed = conn.execute(
-        "SELECT COUNT(*) FROM workflow_instances WHERE status = 'failed'"
-    ).fetchone()[0]
-    total_commands = conn.execute("SELECT COUNT(*) FROM commands_log").fetchone()[0]
-    wf_rows = conn.execute(
-        "SELECT composition, COUNT(*) as cnt FROM workflow_instances GROUP BY composition"
-    ).fetchall()
-    conn.close()
-    _send_json(handler, {
-        "total_runs": total,
-        "running": running,
-        "completed": completed,
-        "failed": failed,
-        "success_rate": round(completed / total * 100, 1) if total > 0 else 0,
-        "total_commands": total_commands,
-        "by_workflow": [{"workflow": r[0], "count": r[1]} for r in wf_rows],
-    })
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM workflow_instances").fetchone()[0]
+        running = conn.execute(
+            "SELECT COUNT(*) FROM workflow_instances WHERE status = 'running'"
+        ).fetchone()[0]
+        completed = conn.execute(
+            "SELECT COUNT(*) FROM workflow_instances WHERE status = 'completed'"
+        ).fetchone()[0]
+        failed = conn.execute(
+            "SELECT COUNT(*) FROM workflow_instances WHERE status = 'failed'"
+        ).fetchone()[0]
+        total_commands = conn.execute("SELECT COUNT(*) FROM commands_log").fetchone()[0]
+        wf_rows = conn.execute(
+            "SELECT composition, COUNT(*) as cnt FROM workflow_instances GROUP BY composition"
+        ).fetchall()
+        _send_json(handler, {
+            "total_runs": total,
+            "running": running,
+            "completed": completed,
+            "failed": failed,
+            "success_rate": round(completed / total * 100, 1) if total > 0 else 0,
+            "total_commands": total_commands,
+            "by_workflow": [{"workflow": r[0], "count": r[1]} for r in wf_rows],
+        })
+    except Exception:
+        _send_json(handler, {
+            "total_runs": 0,
+            "running": 0,
+            "completed": 0,
+            "failed": 0,
+            "success_rate": 0,
+            "total_commands": 0,
+            "by_workflow": [],
+        })
+    finally:
+        conn.close()
 
 
 def _api_list_concepts(handler) -> None:

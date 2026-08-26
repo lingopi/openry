@@ -1,0 +1,27 @@
+# ============================================================================
+# loop_bootstrap — Loop Engineering 播种阶段（Composition）
+# ============================================================================
+# 合并了原「需求读取 + 计划 + 初步生成」三个环节为一个 composition：
+#
+#   loop_seed_build（单一 big_step，5 个 sub_step 串行）
+#     ├── read_requirement_md（shell：cat 需求全文，semantic_reporting: false）
+#     ├── plan_workflow       （agent：把需求做成执行步骤方案）
+#     ├── build_initial_yaml  （agent：组装全部 prompt_blocks，构建纯 agent 的初步 YAML）
+#     ├── verify_seed_yaml    （shell 入场券：存在 + 解析 + name/ref 定值）
+#     └── route_to_run        （agent 路由：yaml_valid=true → 跳 loop_trigger_run）
+#
+# 设计哲学（见 config-building-guide.md）：
+#   - 验证生成物 = 真实运行生成物本身（套娃），静态校验只是入场券
+#   - 初步构建从简：全部 kind: agent + 自然语言，边做边改交给迭代循环
+#
+# 只触发本 composition 即可跑完整条链：
+#   loop_bootstrap → loop_run_workflow（套娃运行 loop_target）
+# ============================================================================
+name: loop_bootstrap
+version: "1.0"
+description: "Loop Engineering 播种：读取需求 → 计划 → 构建初步 loop_target → 路由到运行环节"
+
+big_steps:
+  - ref: loop_seed_build
+    on_success: done
+    on_failure: abort

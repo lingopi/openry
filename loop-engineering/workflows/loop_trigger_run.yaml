@@ -1,0 +1,62 @@
+# ============================================================================
+# loop_trigger_run — 环节三 Big Step ①：启动标记 + 套娃接入（第一步）
+# ============================================================================
+# 单个 agent sub_step（start_and_jump）：
+#   1. inherit loop_generate_yaml 产出的 payload（含 ref，值为 loop_target）
+#   2. echo "开始了"（运行标记）
+#   3. 上报 payload：{"run_time": 1, "ref": "<回传>"}
+#   4. 条件路由：run_time == 1 且 ref == loop_target → 跳转 loop_target（定值）
+#
+# 说明：on_match 暂不支持变量，loop_target 为定值；
+#       生成器（loop_generate_yaml）写死该值并做硬验证。
+# ============================================================================
+name: loop_trigger_run
+version: "1.0"
+description: "echo 开始标记，上报 run_time/ref，条件路由套娃进入 loop_target"
+timeout_minutes: 10
+max_retries: 0
+
+sub_steps:
+  # ── 启动标记 + 动态接入（第一步核心）──
+  - id: start_and_jump
+    kind: agent
+    inherit_payload: true
+    description: |
+      你是循环启动节点。
+
+      1. 用 openry_run 执行 'echo "开始了"' 输出开始标记。
+      2. 从上方「Previous step results」读取 ref 的值（这是环节二生成的
+         composition 中第一个 big_step 的 ref，值为 loop_target）。
+      3. 用 openry_status 上报 completed，payload 必须包含：
+         {"run_time": 1, "ref": "<回传 Previous step results 中的 ref>"}
+
+      不要改动 ref 的值。
+    on_success: done
+    on_failure: abort
+    max_tool_calls: 5
+    max_sub_step_retries: 3
+    on_validation_fail: retry_current
+    expect_payload: true
+    payload_keys: ["run_time", "ref"]
+
+    # 条件路由（短路求值）：
+    #  条目1：run_time == 1 → continue
+    #  条目2：ref == loop_target（定值，既有值又锁住目标）→ 套娃跳入 loop_target
+    # 注：when 条件不支持 payload_has_key（Phase 3a 注册表无此类型），
+    #     用 payload_value_equals 同时完成「有值」与「定值」两个语义。
+    validation_routing:
+      - when:
+          type: payload_value_equals
+          key: run_time
+          value: 1
+        on_match: continue
+        on_mismatch: abort
+        on_mismatch_message: "run_time 必须为 1"
+
+      - when:
+          type: payload_value_equals
+          key: ref
+          value: "loop_target"
+        on_match: loop_target
+        on_mismatch: abort
+        on_mismatch_message: "ref 不是定值 loop_target，无法确定跳转目标"

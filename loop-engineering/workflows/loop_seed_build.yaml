@@ -1,0 +1,304 @@
+# ============================================================================
+# loop_seed_build — 播种阶段 Big Step：读需求 → 计划 → 构建 → 校验 → 路由
+# ============================================================================
+# sub_step 链（全部串行）：
+#   ① read_requirement_md   shell：cat 需求全文（semantic_reporting: false 跳过蒸馏）
+#   ② plan_workflow         agent：把用户需求做成执行步骤方案（只产出 plan_text）
+#   ②.5 write_plan_md       shell：把 plan_text 写入 plan.md（write-file）
+#   ③ build_initial_yaml    agent：生成两份 YAML 内容进 payload（只做大脑，禁止写）
+#   ③.5 write_*_yaml        shell：write-file 写盘两个 loop_target 文件 + verify yaml
+#   ④ verify_seed_yaml      shell 入场券：name/ref 非定值就地修复，不可修才回环
+#   ⑤ route_to_run          agent 路由：yaml_valid=true → 跨 composition 跳 loop_trigger_run
+#
+# 注：shell 步骤的 payload 只含 stdout 提取的 key；agent 步骤必须显式回传
+#     需要保留的 key（不自动合并）。见 config-building-guide.md。
+# ============================================================================
+name: loop_seed_build
+version: "1.5-filebridge"
+description: "读取需求全文 → 制定执行计划 → 生成内容（只做大脑）→ shell 写盘 → 入场券校验 → 路由"
+timeout_minutes: 45
+max_retries: 0
+
+sub_steps:
+  # ── ① shell 读取需求全文（不做蒸馏，全文进 _stdout 传给下游）──
+  - id: read_requirement_md
+    kind: shell
+    note: "cat 需求全文，跳过语义蒸馏"
+    command: cat /Users/yifan/.openry/agent-workspace/loop/requirement.md
+    semantic_reporting: false      # 跳过语义蒸馏（避免 spawn 蒸馏 agent）
+    timeout_seconds: 30
+    on_success: plan_workflow
+    on_failure: abort
+
+  # ── ② agent 制定执行计划 ──
+  - id: plan_workflow
+    kind: agent
+    note: "把用户需求拆解成执行步骤方案，产出 plan_text"
+    inherit_payload: true
+    prompt_blocks:
+      - type: text
+        label: "任务"
+        content: |
+          你是 workflow 规划师。上方「Previous step results」的 _stdout 是用户需求全文。
+
+          请把用户需求拆解成一份执行步骤方案：
+          1. 拆成 2~6 个执行步骤（粒度：每个 sub_step 只做一件事），
+             全部用自然语言描述要做什么，不需要指定具体命令 / 脚本。
+          2. 每个步骤写明：目的、大致产出（payload 字段）、步骤之间的上下文传递。
+          3. 用 openry_status 上报 completed，payload 必须包含：
+             {"plan_text": "完整方案文本"}
+
+          约束：你只产出方案文本，不写任何文件（plan.md 由下游 shell 步骤负责写入）。
+    on_success: write_plan_md
+    on_failure: abort
+    max_tool_calls: 15
+    max_sub_step_retries: 2
+    on_validation_fail: retry_current
+    expect_payload: true
+    payload_keys: ["plan_text"]
+
+  # ── ②.5 shell 写入计划文件（agent 只产内容，写盘下沉到 shell）──
+  - id: write_plan_md
+    kind: shell
+    note: "把 ② 的 plan_text 写入 plan.md"
+    inherit_payload: true
+    command: >
+      printf '%s' ${payload.plan_text} |
+      openry write-file --path /Users/yifan/.openry/agent-workspace/test/loop/plan.md --stdin --force
+    payload_keys: [written, bytes, path]
+    semantic_reporting: false
+    on_success: build_initial_yaml
+    on_failure: abort
+
+  # ── ③ agent 构建初步架构（组装全部 prompt_blocks）──
+  - id: build_initial_yaml
+    kind: agent
+    note: "生成两份 loop_target YAML 内容进 payload，只做大脑禁止写文件"
+    inherit_payload: true
+
+    prompt_blocks:
+      - type: file
+        path: "~/.openry/prompts/compositions-and-workflows-guide.md"
+        label: "OpenRY YAML 配置参考手册（有什么）"
+      - type: file
+        path: "~/.openry/prompts/config-building-guide.md"
+        label: "配置构建思路指南（怎么想）"
+      - type: file
+        path: "~/.openry/agent-workspace/test/loop/plan.md"
+        label: "执行计划（② 的产出，文件桥注入）"
+      - type: file
+        path: "~/.openry/agent-workspace/loop/requirement.md"
+        label: "用户需求（文件桥注入）"
+      - type: text
+        label: "生成目标硬性约定（不可违反）"
+        content: |
+          1. 文件固定为：
+             /Users/yifan/.openry/workflows/loop_target.yaml（name 必须是 loop_target）
+             /Users/yifan/.openry/compositions/loop_target.yaml（big_steps 第一个 ref 必须是 loop_target，on_success: done）
+          2. workflow 内所有 sub_step id 以 t_ 开头且互不重复
+          3. 所有 sub_step 一律 kind: agent，提示词用 prompt_blocks 书写，
+             **禁止 description**；不要写 shell 命令 / 脚本 / 插值模板
+             （细节交给迭代循环边做边改）
+          4. 每个 sub_step 配 note（≤50 字一句话说明）与 inherit_payload: true，
+             并在上报时回传需要保留的 key
+          5. 最后一步 id 必须是 t_report_result：上报 {"step_ok": true/false}，
+             on_success: done
+          6. 至少一个 sub_step 配 payload_keys；每个 sub_step 配 command_policy
+             blocklist（禁止 rm/sudo/chmod/chown/kill）
+          7. 每个 sub_step（含 t_report_result）配 on_dropped: loop_analyze_failure
+             （失败直接进入迭代分析修复闭环）
+      - type: text
+        label: "任务说明"
+        content: |
+          你是初步架构构建 agent（只做大脑，禁止写文件）。
+
+          情况 A（正常路径）：根据注入的「执行计划」与「用户需求」构建 v1。
+          情况 B（修复路径）：如果 Previous step results 中 yaml_valid == false，
+            说明上一版校验失败，请根据校验结论重新生成两份 YAML 内容。
+
+          任务（只生成内容，不执行任何写入）：
+          1. 严格按「生成目标硬性约定」生成两份完整 YAML 文本
+          2. 用 openry_status 上报 completed，payload 必须包含：
+             {"workflow_yaml": "loop_target workflow 的完整 YAML 文本",
+              "composition_yaml": "loop_target composition 的完整 YAML 文本"}
+          3. 两份文本必须是合法 YAML；文件名/路径/写盘由下游 shell 步骤负责
+          4. workflow_yaml / composition_yaml 作为 payload 的字符串值 = 纯文本内容，
+             不要加任何 YAML 语法前缀（禁止以 |- 或 | 开头）；
+             在生成的两份 YAML 文件内部，长文本字段（prompt_blocks 的 content、note）
+             用 | 块标量书写，禁止双引号长字符串（实例 43/44 实测翻车点）
+          5. 系统会对 workflow_yaml / composition_yaml 做 YAML 语法硬验证，
+             不通过会要求你重新上报（最多重试 2 次）
+
+    on_success: write_workflow_yaml
+    on_failure: abort
+    max_tool_calls: 25
+    max_sub_step_retries: 2
+    on_validation_fail: retry_current
+    expect_payload: true
+    payload_keys: ["workflow_yaml", "composition_yaml"]
+    validation:
+      - type: payload_yaml_valid
+        key: workflow_yaml
+      - type: payload_yaml_valid
+        key: composition_yaml
+
+    command_policy:
+      mode: blocklist
+      commands: ["rm", "sudo", "chmod", "chown", "kill", "shutdown", "reboot"]
+
+  # ── ③.5a shell 写入 workflow YAML（写盘 + 语法验证）──
+  - id: write_workflow_yaml
+    kind: shell
+    note: "把 ③ 生成的 workflow_yaml 写入 loop_target.yaml 并验证语法"
+    inherit_payload: true
+    command: >
+      printf '%s' ${payload.workflow_yaml} |
+      openry write-file --path /Users/yifan/.openry/workflows/loop_target.yaml --stdin --verify yaml --force
+    payload_keys: [written, bytes, verified]
+    semantic_reporting: false
+    on_success: write_composition_yaml
+    on_failure: abort
+    on_dropped: build_initial_yaml
+
+  # ── ③.5b shell 写入 composition YAML（写盘 + 语法验证）──
+  - id: write_composition_yaml
+    kind: shell
+    note: "把 ③ 生成的 composition_yaml 写入 loop_target composition 并验证语法"
+    payload_from: build_initial_yaml
+    command: >
+      printf '%s' ${payload.composition_yaml} |
+      openry write-file --path /Users/yifan/.openry/compositions/loop_target.yaml --stdin --verify yaml --force
+    payload_keys: [written, bytes, verified]
+    semantic_reporting: false
+    on_success: verify_seed_yaml
+    on_failure: abort
+    on_dropped: build_initial_yaml
+
+  # ── ④ shell 入场券：name/ref 定值槽位就地修复（结构不可修才判失败）──
+  - id: verify_seed_yaml
+    kind: shell
+    note: "入场券：name/首个 ref 非 loop_target 就地修复，不可修才判失败"
+    inherit_payload: true
+    command: |
+      python3 - <<'PYEOF'
+      import json, os, re, yaml
+      home = os.path.expanduser("~")
+      ref = "loop_target"
+      wp = f"{home}/.openry/workflows/{ref}.yaml"
+      cp = f"{home}/.openry/compositions/{ref}.yaml"
+      valid = True
+      fixed = []
+
+      def fix_first_name(text):
+          # 第一个顶层 name: 行 → 定值；没有该行则插到文件头
+          new_text, n = re.subn(r"(?m)^name\s*:.*$", f"name: {ref}", text, count=1)
+          if n == 0:
+              new_text = f"name: {ref}\n" + text
+          return new_text
+
+      def fix_first_ref(text):
+          # big_steps 下第一个 "- ref:" 行 → 定值；找不到返回 None（不可修）
+          m = re.search(r"(?m)^\s*big_steps\s*:", text)
+          if not m:
+              return None
+          tail = text[m.end():]
+          rm = re.search(r"(?m)^(\s*-\s*)ref\s*:.*$", tail)
+          if not rm:
+              return None
+          return text[:m.end()] + tail[:rm.start()] + rm.group(1) + f"ref: {ref}" + tail[rm.end():]
+
+      # ① workflow：存在 + 可解析；name 非定值就地修复；sub_steps 为空不可修
+      if not os.path.exists(wp):
+          valid = False
+      else:
+          try:
+              w_text = open(wp, encoding="utf-8").read()
+              w = yaml.safe_load(w_text)
+              if not isinstance(w, dict):
+                  valid = False
+              else:
+                  if w.get("name") != ref:
+                      w_text = fix_first_name(w_text)
+                      open(wp, "w", encoding="utf-8").write(w_text)
+                      fixed.append("workflow.name")
+                      w = yaml.safe_load(w_text)
+                  if not isinstance(w, dict) or w.get("name") != ref or not w.get("sub_steps"):
+                      valid = False
+                  if valid:
+                      # 新契约：每个 sub_step 必须配 on_dropped=loop_analyze_failure
+                      for ss in (w.get("sub_steps") or []):
+                          if not isinstance(ss, dict) or ss.get("on_dropped") != "loop_analyze_failure":
+                              valid = False
+                              break
+          except Exception:
+              valid = False
+
+      # ② composition：存在 + 可解析；首个 ref 非定值就地修复；无 big_steps 不可修
+      first_ref = None
+      if not os.path.exists(cp):
+          valid = False
+      else:
+          try:
+              c_text = open(cp, encoding="utf-8").read()
+              c = yaml.safe_load(c_text)
+              bs = (c.get("big_steps") or []) if isinstance(c, dict) else []
+              first_ref = bs[0].get("ref") if bs else None
+              if first_ref != ref:
+                  new_text = fix_first_ref(c_text)
+                  if new_text is None:
+                      valid = False
+                  else:
+                      open(cp, "w", encoding="utf-8").write(new_text)
+                      fixed.append("composition.first_ref")
+                      c2 = yaml.safe_load(new_text)
+                      bs2 = (c2.get("big_steps") or []) if isinstance(c2, dict) else []
+                      first_ref = bs2[0].get("ref") if bs2 else None
+                      if first_ref != ref:
+                          valid = False
+          except Exception:
+              valid = False
+
+      print(json.dumps({
+          "yaml_valid": valid,
+          "ref": first_ref if first_ref == ref else "",
+          "fixed": fixed,
+          "workflow_yaml_path": wp,
+          "composition_yaml_path": cp,
+      }))
+      PYEOF
+    payload_keys: ["yaml_valid", "ref", "fixed"]
+    payload_keys_on_error: abort
+    timeout_seconds: 60
+    on_success: route_to_run
+    on_failure: abort
+
+  # ── ⑤ agent 路由（shell 不能评估 validation_routing）──
+  - id: route_to_run
+    kind: agent
+    note: "原样回传 payload，触发 validation_routing 条件路由"
+    inherit_payload: true
+    prompt_blocks:
+      - type: text
+        label: "任务"
+        content: |
+          你是路由节点。请将上方「Previous step results」中的 payload 原样回传：
+
+          用 openry_status 上报 completed，payload 与 Previous step results
+          完全一致（至少包含 yaml_valid、ref，不要改动任何值）。
+    on_success: done
+    on_failure: abort
+    max_tool_calls: 5
+    max_sub_step_retries: 3
+    on_validation_fail: retry_current
+    expect_payload: true
+    payload_keys: ["yaml_valid", "ref"]
+
+    # 条件路由：入场券通过 → 跨 composition 跳环节三；失败 → 回到构建步骤重写
+    validation_routing:
+      - when:
+          type: payload_value_equals
+          key: yaml_valid
+          value: true
+        on_match: loop_trigger_run
+        on_mismatch: build_initial_yaml
+        on_mismatch_message: "生成物硬验证失败（缺失/无法解析/ref 不是 loop_target），需要重新构建"

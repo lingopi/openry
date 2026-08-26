@@ -53,6 +53,10 @@ def _get_conn(db_path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
+    # Ensure Phase 2 tables exist (workflow_instances, worker_pool, etc.)
+    # Must be applied BEFORE _ensure_phase2_columns since ALTER TABLE needs
+    # task_state to already exist (which _SCHEMA creates).
+    conn.executescript(_PHASE2_SCHEMA_EXTENSION)
     conn.commit()
     # Ensure Phase 2+ columns exist (idempotent ALTER TABLE, safe to call every time)
     _ensure_phase2_columns(conn)

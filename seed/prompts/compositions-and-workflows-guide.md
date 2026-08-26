@@ -100,7 +100,7 @@ big_steps:
 | `big_steps` | list | 是 | Big Step 引用列表，**按顺序串行执行** |
 | `big_steps[].ref` | string | 是 | 引用的 Big Step 名称，对应 `workflows/{ref}.yaml` 文件 |
 | `big_steps[].on_success` | string | 是 | 当前 Big Step 成功后跳转到哪个 Big Step 的 `ref`，或 `done`（整个 Composition 完成） |
-| `big_steps[].on_failure` | string | 是 | 当前 Big Step 失败后跳转到哪个 Big Step 的 `ref`，或 `abort`（整个 Composition 失败） |
+| `big_steps[].on_failure` | string | 是 | 当前 Big Step 失败后跳转到哪个 Big Step 的 `ref`，或 `abort`（整个 Composition 失败）。**⚠️ 注意：TS 运行栈（patrol.ts advanceBigStep）目前只读 `on_success`，此字段尚未生效** |
 
 ### 3.3 启动方式
 
@@ -186,7 +186,7 @@ sub_steps:
 | `version` | string | 否 | — | 版本号 |
 | `description` | string | 否 | — | Big Step 描述 |
 | `timeout_minutes` | int | 否 | — | 单次尝试的最大时长（分钟）。**从 sub_step_1 开始计时，重试不重置**。超时后 Orchestrator 触发软刹车 → agent 收到取消通知 → 更新为 cancelled → 硬刹车 SIGTERM→SIGKILL |
-| `max_retries` | int | 否 | 0 | Big Step 级别最大重试次数。当 `on_failure: abort` 或 timeout 触发，且 `big_step_retry_count < max_retries` 时，从 sub_step_1 重新开始 |
+| `max_retries` | int | 否 | 0 | Big Step 级别最大重试次数（**⚠️ TS 运行栈已废弃**：patrol.ts 明确「big_step 级别重试已废弃」，此字段当前无效）。旧 Python 引擎语义：当 `on_failure: abort` 或 timeout 触发且 `big_step_retry_count < max_retries` 时，从 sub_step_1 重新开始 |
 | `sub_steps` | list | 是 | — | sub_step 定义列表，按数组顺序串行执行 |
 
 ---
@@ -198,22 +198,24 @@ sub_steps:
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|:--:|--------|------|
 | `id` | string | 是 | — | sub_step 唯一标识，在同一个 Big Step 内不可重复。用于路由目标 |
-| `kind` | string | 否 | `agent` | 执行模式。`agent`：spawn agent session（AI 决策）；`shell`：直接 `subprocess.run` 执行脚本（Phase 3b 设计，代码中已预留） |
-| `description` | string | 是* | — | 注入给 agent 的任务描述（prompt）。agent 通过 `openclaw session start --task {description}` 启动时会接收到这段文字。当 `prompt_blocks` 存在时，`description` 被忽略 |
+| `kind` | string | 否 | `agent` | 执行模式。`agent`：spawn agent session（AI 决策）；`shell`：Orchestrator 直接 spawn 脚本（确定性执行，无 AI 参与） |
+| `description` | string | 否 | — | ⚠️ **已废弃（2026-08-17）**：agent step 的提示词唯一载体是 `prompt_blocks`，禁止再写 `description`（规范形契约，见 `loop-engineering/iteration-canonical-form.md`）。仅 workflow 级的 `description` 仍可用 |
+| `note` | string | 否 | — | **规范形必填（2026-08-17）**：一句话（≤50 字）说明本步做什么。不进 agent prompt，供人类与 knowql discover 阅读 |
 
 ### 5.2 路由字段
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|:--:|--------|------|
 | `on_success` | string | 是 | — | sub_step 验证通过后的路由目标。值：`done`（Big Step 完成）、或同 Big Step 内另一个 sub_step 的 `id` |
-| `on_failure` | string | 是 | — | sub_step 执行失败后的路由。值：`abort`（触发 Big Step 级别重试）、`retry`（只重试当前 sub_step，不触发 Big Step 重试）、或指定 sub_step `id` |
-| `on_validation_fail` | string | 否 | `retry_current` | 硬验证失败后的路由。值：`retry_current`（重试当前 sub_step）、`abort`（直接失败）、或指定 sub_step `id` |
+| `on_failure` | string | 是 | — | sub_step 执行失败后的路由。**⚠️ 实测（2026-08-14）只有 `retry` 生效**：`retry` = 重试当前 sub_step（需配 `max_sub_step_retries`，耗尽后 dropped）。其他任何值（含 `abort`、指定 sub_step `id`）一律 dropped，**不会跳转**——sub_step 级失败路由与 Big Step 级重试均未实现（cli.py / engine.py / patrol.ts 三处一致） |
+| `on_validation_fail` | string | 否 | `retry_current` | 硬验证失败后的路由。**⚠️ 实测只有 `retry_current` 生效**：重试当前 sub_step（受 `max_sub_step_retries` 限制，耗尽后 dropped）。其他值（含 `abort`、指定 sub_step `id`）→ dropped，无路由 |
+| `on_dropped` | string | 否 | — | **失败终态回收路由（2026-08-17 新增，方案乙）**。存在即开关：任务最终失败（本应 dropped）时，若配置此字段则状态改为 `retrieve`，由 patrol 的 routeRetrieve 按此目标路由。目标语法对齐 validation_routing：`abort`（默认）/ 同 Big Step sub_step `id` / big_step 名 / `big_step_name:sub_step_id`。目标无效时降级 dropped。不配置 = 现状（直接 dropped） |
 
 ### 5.3 重试控制字段
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|:--:|--------|------|
-| `max_sub_step_retries` | int | 否 | 3 | sub_step 级别最大重试次数。对应 DB 列 `max_sub_step_retries`。仅在 `on_failure: retry` 或 `on_validation_fail: retry_current` 时生效。重试计数器为 `sub_step_retry_count`，每次重试 +1。耗尽后升级为 `abort` / `dropped` |
+| `max_sub_step_retries` | int | 否 | 3 | sub_step 级别最大重试次数。对应 DB 列 `max_sub_step_retries`。仅在 `on_failure: retry` 或 `on_validation_fail: retry_current` 时生效。重试计数器为 `sub_step_retry_count`，每次重试 +1。耗尽后直接 `dropped` |
 | `max_tool_calls` | int | 否 | 10 | 本 sub_step 中 agent 最多调用 `openry -c` 的次数。超过后标记为 `failed`。由 `commands_log` 表中 `COUNT(*) WHERE run_id = ?` 实现计数 |
 
 ### 5.4 Payload 字段
@@ -240,72 +242,84 @@ sub_steps:
 6. overflow workflow 完成后结果写入原 run_id 的 payload
 7. Orchestrator 重新 spawn agent session，恢复执行
 
-### 5.6 命令策略字段
+### 5.6 Shell 模式字段（Phase 3b — 已实现）
 
-`command_policy` 支持三种值形式：
-
-**① 内置预设名（字符串）**：
-```yaml
-command_policy: strict       # 或 moderate、permissive
-```
-三个内置预设（strict / moderate / permissive）无需额外文件，直接可用。
-
-**② 自定义策略文件名（字符串）**：
-```yaml
-command_policy: office_safe
-```
-从 `~/.openry/policies/office_safe.yaml` 加载自定义策略。策略文件与内置预设格式相同：
-```yaml
-# ~/.openry/policies/office_safe.yaml
-mode: blocklist
-commands:
-  - rm
-  - sudo
-  - shutdown
-patterns:
-  - regex: "^curl\\s+.*evil\\.com"
-    description: "禁止访问恶意域名"
-```
-安装时 `seed/policies/` 中的模板文件会自动复制到 `~/.openry/policies/`。
-
-**③ 内联对象**：
-```yaml
-command_policy:
-  mode: blocklist
-  commands: ["rm", "sudo", "chmod", "kill"]
-```
+当 `kind: shell` 时，以下字段生效。Shell 模式不经过 agent，Orchestrator 直接 spawn 脚本并捕获 stdout 作为 payload。
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|:--:|--------|------|
-| `command_policy` | string/object | 否 | — | 预设名、自定义策略文件名、或内联策略对象 |
-| `command_policy.mode` | string | 是* | `unrestricted` | 内联模式才需要。`unrestricted`：不限制；`allowlist`：只允许列表中的命令；`blocklist`：禁止列表中的命令 |
-| `command_policy.commands` | list[string] | 否 | `[]` | 命令名列表（取命令字符串的第一个空格前 token 匹配） |
-| `command_policy.patterns` | list[object] | 否 | `[]` | 正则表达式列表，每条含 `regex`（正则）和 `description`（说明） |
+| `command` | string | 是（shell 时） | — | 要执行的 shell 命令。支持 `${payload.xxx}` 和 `${env.VAR}` 模板插值 |
+| `timeout_seconds` | int | 否 | `300` | shell 执行超时秒数。超时后 SIGTERM → 5s → SIGKILL |
+| `env` | dict | 否 | `{}` | 注入的环境变量。可通过 `${env.VAR}` 在 command 中引用 |
+| `payload_keys` | list[string] | 否 | — | 从 stdout JSON 中提取的 key 白名单。若脚本输出合法 JSON 则按白名单提取；否则全文作为 `_stdout` |
+| `payload_keys_on_error` | string | 否 | `abort` | stdout 非 JSON 时的降级策略。`abort`：直接 dropped（终止，不重试）；`fallback`：降级到 `_stdout` |
+| `overflow_strategy` | string | 否 | `truncate` | stdout 超 `max_output_tokens` 时的策略。`truncate`：截断；`workflow`：触发 overflow workflow；`fail`：直接 dropped |
+| `payload_from` | string | 否 | — | 引用指定 upstream step 的 `step_id` payload（跳过中间 step）。与 `inherit_payload` 配合：inherit 打底，payload_from 覆盖同名 key |
+| `inherit_payload` | bool | 否 | `false` | 继承直接上游 payload，使 `${payload.xxx}` 模板插值可用 |
 
-### 5.7 语义蒸馏字段（Phase D）
+**Shell 模式的 payload 规则**：
+- 默认：stdout 全文 → `{"_stdout": "<全文>"}`
+- 若设 `payload_keys` 且 stdout 为合法 JSON → 白名单提取 → `{"key_a":"...","key_b":"..."}`
+- 若设 `payload_keys` 但 stdout 非 JSON → 按 `payload_keys_on_error` 降级
 
-| 字段 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|:--:|--------|------|
-| `semantic_reporting` | bool | 否 | `true` | 是否启用语义蒸馏和概念聚类。`false` 时：agent step 不会收到 8 原语 + concepts 上报提示词；shell step 不会触发蒸馏 agent。该 step 的产出不会进入向量知识库 |
+**⚠️ 硬验证职责边界（2026-08-17 定稿）**：业务硬验证必须挂在**产出 payload 的 agent 步**的 `validation:` 字段上（失败配 `on_validation_fail: retry_current` 让 agent 当场重改）；shell 步内的本地校验（如 `openry write-file --verify yaml`）只是写盘安全的最后防线，**不能作为唯一验证手段**——否则失败时 `on_failure: abort` 直接死链（实例 43/44/45 实测翻车）。
 
-**设计意图**：并非所有 step 都需要进入知识库。对于纯工具调用、数据格式转换、或中间临时的 step，设置 `semantic_reporting: false` 可以减少 LLM token 消耗并避免无意义的向量存储。
+**Shell 模式与语义蒸馏的关系**（重要）：
+
+| 配置 | payload 落库内容 | 是否触发 LLM 蒸馏 | 下游等待 |
+|:---|:---|:---:|:---|
+| 无 `payload_keys` | `{"_stdout": "<全文>", "_compressed": false}` | ✅ 触发（扫描到 `_stdout` 后 spawn 蒸馏 agent） | 若下游 `inherit_payload: true`，会等蒸馏完成后才 dispatch |
+| 有 `payload_keys` | `{"key_a":"...","_compressed": false}`（**无 `_stdout`**） | ❌ **不触发**——原始 stdout 未落库，蒸馏扫描发现无 `_stdout` 可蒸馏，直接短路标记 `_compressed: true` | 无需等待，下游立即执行 |
+
+原理：`payload_keys` 白名单提取本身就是结构化结果（"提取即压缩"），不需要 LLM 再蒸馏。**配置了 `payload_keys` 的 shell step 不会触发蒸馏**，其原始 stdout 全文也不会存进 DB。
+
+**Shell 示例**：
 
 ```yaml
-# 示例：一个不需要语义蒸馏的纯工具 step
-- id: format_converter
-  kind: agent
-  description: "将 JSON 转换为 CSV 格式"
-  semantic_reporting: false   # 不上报 concepts，不进向量库
+# 最简单：stdout 全文即 payload
+- id: list_files
+  kind: shell
+  command: "ls -la /data/"
+  timeout_seconds: 10
   on_success: done
-  on_failure: abort
+
+# JSON 提取
+- id: api_check
+  kind: shell
+  command: "python3 /scripts/health_check.py"
+  payload_keys: ["status", "latency_ms"]
+  on_success: done
+
+# 模板插值：上游 agent 产出驱动 shell 参数
+- id: pull_mail
+  kind: shell
+  command: "python3 /scripts/mailpull.py --thread ${payload.thread_id} --msg ${payload.message_id}"
+  inherit_payload: true
+  timeout_seconds: 120
+  on_success: done
+
+# payload_from：跳过中间 step 直引指定上游
+- id: finalize
+  kind: shell
+  command: "python3 /scripts/finalize.py --id ${payload.thread_id}"
+  payload_from: find_thread
+  on_success: done
+
+# 溢出截断
+- id: extract_logs
+  kind: shell
+  command: "cat /var/log/large.log"
+  max_output_tokens: 5000
+  overflow_strategy: truncate
+  on_success: done
 ```
 
-**行为差异**：
+### 5.7 命令策略字段
 
-| `semantic_reporting` | agent step | shell step |
-|---------------------|-----------|------------|
-| `true`（默认） | prompt 末尾自动注入 `semantic-primitives.md`；agent 可按指南上报 concepts | 输出被扫描 → 触发蒸馏 agent → 蒸馏产物进入向量库 |
-| `false` | prompt 中不含语义上报指南；agent 不上报 concepts 也不会报错 | 跳过蒸馏，直接标记 `_compressed: true`；不进向量库 |
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|:--:|--------|------|
+| `command_policy.mode` | string | 否 | `unrestricted` | `unrestricted`：不限制；`allowlist`：只允许列表中的命令；`blocklist`：禁止列表中的命令 |
+| `command_policy.commands` | list[string] | 否 | `[]` | 命令名列表（取命令字符串的第一个空格前 token 匹配） |
 
 ---
 
@@ -414,7 +428,7 @@ validation:
 
 实现：`conn.execute(query).fetchone() is not None`
 
-### 6.3 Phase 3a 验证规则（10 种 — 已实现）
+### 6.3 Phase 3a 验证规则（11 种 — 已实现）
 
 这些规则在 `openry/orchestrator/validator.py` 中**均已完整实现**，通过统一的 `validate(ctx, rule)` 入口调用：
 
@@ -438,6 +452,19 @@ validation:
 ```
 
 比较 payload 中指定 key 的值是否等于给定字面量。支持 string、number、boolean、null。
+
+#### `payload_yaml_valid` — 校验 payload 字符串是否为合法 YAML（2026-08-17 新增）
+
+```yaml
+validation:
+  - type: payload_yaml_valid
+    key: workflow_yaml
+```
+
+实现：对 key 的值执行 `yaml.safe_load`，非字符串或解析失败均不通过。
+典型用法：agent 生成 YAML 内容进 payload 时做**硬验证**，配合
+`on_validation_fail: retry_current` 让 agent 当场重改，坏内容根本走不到下游
+（实例 43/44/45 教训）。
 
 #### `payload_value_in_set` — 值在/不在集合中
 
@@ -541,7 +568,21 @@ Orchestrator 直接发起 HTTP 请求并验证状态码。
 | `abort` | 当前 Big Step 失败（终止） |
 | `retry_current` | 重试当前 sub_step（受 `max_sub_step_retries` 限制） |
 | `continue` | 本条路由通过，继续求值下一条 `validation_routing` 条目 |
-| 其他字符串 | 被视为同 Big Step 内另一个 sub_step 的 `id`，跳转到该 sub_step |
+| `sub_step_id` | 当前 Big Step 内的另一个 sub_step，跳转到该 sub_step |
+| `big_step_name` | **跨 big_step 跳转**：跳到该 big_step 的**第一个** sub_step |
+| `big_step_name:sub_step_id` | **跨 big_step 跳转**：跳到该 big_step 的**指定** sub_step |
+
+**解析优先级**：保留关键字 → 当前 Big Step 内 sub_step ID → big_step 名（`workflows/{name}.yaml` 存在即命中）→ 都找不到 → 报错。
+
+> 注意：sub_step 级的 `on_success` 只能路由到**同 Big Step 内**的 sub_step；`on_failure` 当前仅 `retry` 生效（详见 5.2，sub_step 级失败跳转未实现）。跨 big_step 跳转只通过 `validation_routing` 的 `on_match` / `on_mismatch` 目标实现。
+
+**跨 big_step 跳转语义**（同一 workflow instance 内跳转，**没有"子 workflow"概念**）：
+
+1. 硬代码扫描 `compositions/` 目录，找目标 big_step **所属的 composition**：
+   - **找到** → 重写 `workflow_instances.composition` 列为该 composition 名 → 目标 big_step 完成后，`advanceBigStep` 自然沿该 composition 链**继续向下推进**（跳入链中间、跳回链上靠前的 big_step、跳入链尾后结束，全部支持）
+   - **找不到** → 降级 standalone（`composition` 列写 big_step 名）→ 执行完该 big_step 即 workflow 完成
+2. 可以无限套娃跳转：A→B→A→C→……每次跳转只是重写上下文列 + enqueue 目标 sub_step，不产生新 instance、无深度限制。
+3. 跨 big_step 继承：目标 sub_step 配 `inherit_payload: true` 时，上游 payload 传递并带 `_inherits_from_run_id` 追踪（蒸馏完成后会回写下游 queued step）。
 
 ### 7.3 求值逻辑（短路求值 —— 代码实现于 `router.py`）
 
@@ -621,6 +662,49 @@ Orchestrator 直接发起 HTTP 请求并验证状态码。
 1. **硬验证先于条件路由**：`payload_keys` 和 `expect_payload` 检查必须通过后才会执行 `validation_routing`
 2. **硬验证只能决定 retry/abort**：硬验证失败的目标只能是 `retry_current` 或 `abort`。跳转到其他 workflow/big_step/sub_step 必须使用条件路由
 3. **未配置 `validation_routing` 时**：回退到 Phase 2 的二值路由（`on_success` / `on_validation_fail`）
+4. **跨 big_step 跳转只识别存在 YAML 的 big_step 名**：`workflows/{name}.yaml` 不存在时，跳转失败并按正常路由回落
+5. **shell 步骤不评估 `validation_routing`**：`kind: shell` 完成后直接进入 `routeValidated()`（只走 `on_success` / `on_failure`），`validation_routing` 条件路由只在 `kind: agent` 步骤上评估（Python CLI 同步路由写 `routing_target`）。**需要条件路由 / 跨 big_step 跳转的步骤必须用 `kind: agent`**
+
+### 7.6 跨 big_step 套娃跳转示例
+
+```yaml
+# Composition A（nest_flow_a）：[a1 → a2 → a3]
+# Composition B（nest_flow_b）：[b1 → b2]
+
+# a2 的 a2s1：条件路由跳到 B 的第二个 big_step（跳过 b1）
+- id: a2s1
+  kind: agent
+  validation_routing:
+    - when:
+        type: payload_value_equals
+        key: jump
+        value: true
+      on_match: "b2"              # ← big_step 名：从 b2 的第一个 sub_step 进入
+      on_mismatch: abort
+
+# b2 的 b2s2：条件路由跳回 A 的 a2 的第二个 sub_step（指定入口）
+- id: b2s2
+  kind: agent
+  validation_routing:
+    - when:
+        type: payload_value_equals
+        key: back
+        value: true
+      on_match: "a2:a2s2"         # ← big_step:sub_step：从 a2s2 进入，跳过 a2s1
+      on_mismatch: abort
+```
+
+执行流：
+
+```
+a1 → a2.a2s1 条件路由 → b2（composition 列重写为 B）
+  → b2s1 → b2s2 条件路由 → a2:a2s2（composition 列重写回 A）
+  → a2s2 → a2 完成 → advanceBigStep 沿 A 链 → a3 → workflow completed
+```
+
+要点：
+- 跳转目标可以是**任意** big_step 的任意 sub_step，可以跳去别的 composition 链、再跳回来、无限套娃
+- "是否单独执行"由"该 big_step 是否被某个 composition 引用"决定：被引用 → 执行完沿所属链继续；未被任何 composition 引用 → standalone，执行完即 workflow 结束
 
 ---
 
@@ -637,7 +721,7 @@ KnowQL 是 agent 在运行时主动查询历史 payload 数据的知识图谱查
 | `inherit_payload` | Prompt 构建时（push） | 直接上游 step 的 payload | 自动将上一步产出注入当前 agent 的 prompt |
 | KnowQL | Agent 运行时（pull） | 任意历史 step（跨 big_step、跨 composition） | Agent 按需主动探索超出直接上游范围的数据 |
 
-**API 设计**：两种操作——`discover`（探索）和 `query`（精确查询）。扁平化参数，无 key 投影，全量返回 payload。详细指南见 `prompts/openry-payload-query-enhance.md`。
+**API 设计**：两种操作——`discover`（探索）和 `query`（精确查询）。扁平化参数，无 key 投影，全量返回 payload。详细指南见 `prompts/knowql-agent-prompt.md`。
 
 ### 8.2 配置字段
 
@@ -699,6 +783,8 @@ sub_steps:
 
 `prompt_blocks` 允许在 sub_step 的 agent prompt 中动态拼接多个内容源。支持内联文本和外部文件两种类型。
 
+**⚠️ 强制要求（2026-08-17）**：agent step 的提示词必须**全部**通过 `prompt_blocks` 书写，`description` 已废弃（见 5.1）。file block 引用的文件必须存在（渲染时缺失会**静默跳过**）。
+
 **文件路径解析**：相对路径 → 从 `~/.openry/prompt_blocks/` 目录查找；绝对路径和 `~` 路径直接使用。
 
 ### 9.2 YAML 配置
@@ -707,7 +793,7 @@ sub_steps:
 sub_steps:
   - id: edit_draft
     kind: agent
-    description: "基于原始邮件编辑回复草稿"   # prompt_blocks 存在时 description 作为 fallback
+    note: "基于原始邮件编辑回复草稿"    # description 已废弃，一律 prompt_blocks + note
     inherit_payload: true
 
     prompt_blocks:
@@ -780,7 +866,8 @@ sub_step_3 (get_draft)
 
 ```
 queued → in_progress → completed → validated → done（路由到下一步）
-                    ↘ failed    → queued（有重试次数）或 dropped（耗尽）
+                    ↘ failed    → queued（有重试次数）或 dropped（耗尽；
+                                   配置 on_dropped 时终态为 retrieve → patrol 回收路由到目标）
                     ↘ cancelled → failed
                     ↘ overflow  → overflow workflow → 恢复 → queued
 ```
@@ -805,36 +892,30 @@ Orchestrator 不直接杀进程，而是通过 `cancel_requested` 标志通知 a
 ### 12.1 粒度设计
 
 - **每个 sub_step 只做一件事**：不要让 agent 在一个 sub_step 中完成多个不相关任务。粒度越细，验证越精确，重试成本越低
-- **description 要具体**：包含明确的输入、输出格式要求。例如："请执行以下任务，完成后调用 `openry --status completed --payload '{"key":"value"}'`"
-- **敏感操作前加验证 sub_step**：如在 `send_draft` 前加一个 `review_draft` sub_step，确保人工或自动审核
+- **prompt_blocks 要具体**（description 已废弃）：包含明确的输入、输出格式要求。例如："请执行以下任务，完成后调用 `openry --status completed --payload '{"key":"value"}'`"
+- **硬验证挂在 agent 步上**：产出结构化内容的 agent 步配 `validation:`（如 `payload_yaml_valid`），失败 retry_current 当场重改，不要指望末尾 shell 步兜底
 
-### 12.2 Payload 设计
+### 10.2 Payload 设计
 
 - 使用 `payload_keys` 约束 agent 必须产出的字段，避免 agent 遗漏关键数据
 - 用 `inherit_payload: true` 在步骤间传递上下文（如 `message_id`、`thread_id`），而非让 agent 重新查询
 - payload 中的 key 应使用 snake_case（`message_id`、`draft_body`），保持与代码库风格一致
 - 不要将超大内容放入 payload——payload 存储在 SQLite 中，超大 JSON 会影响性能。大数据应写入文件，payload 中只存文件路径
 
-### 12.3 重试策略
+### 10.3 重试策略
 
 - `on_failure: retry` + `max_sub_step_retries`：适用于"agent 可能偶然犯错"的场景（如 API 临时不可用）
 - `on_failure: abort` + `max_retries`（Big Step 级别）：适用于"整个流程需要从头重来"的场景
 - 避免 `max_sub_step_retries` 设置过大——过多次重试通常是 prompt 或 workflow 设计问题
 - **超时时间要包含重试耗时**：`timeout_minutes` 从 sub_step_1 开始时计时，永不重置
 
-### 12.4 安全控制
+### 10.4 安全控制
 
 - 对涉及文件删除、系统修改的 sub_step，务必设置 `command_policy`
 - 推荐大多数 sub_step 使用 `mode: blocklist`，禁止 `rm`、`sudo`、`chmod`、`chown`、`kill`、`shutdown`、`reboot`
 - 只读类 sub_step（如数据查询）可使用 `mode: allowlist`，只允许 `cat`、`grep`、`ls`、`find`、`wc`、`head`、`tail`
 
-### 12.5 语义蒸馏控制
-
-- 对纯工具型、数据转换型、或中间临时的 step，设置 `semantic_reporting: false` 以减少 LLM token 消耗
-- 对产出可供下游检索的业务知识的 step，保持默认 `true` 让 concepts 进入向量库
-- shell step 搭配 `semantic_reporting: false` 可完全跳过蒸馏流程，适用于简单文件读取等无语义价值的操作
-
-### 12.6 验证规则选择
+### 10.5 验证规则选择
 
 | 场景 | 推荐验证类型 |
 |------|------------|
@@ -848,7 +929,7 @@ Orchestrator 不直接杀进程，而是通过 `cancel_requested` 标志通知 a
 | 验证数值范围 | `payload_value_greater_than` / `payload_value_less_than` |
 | 验证复杂嵌套结构 | `json_schema` |
 
-### 12.7 条件路由设计
+### 10.6 条件路由设计
 
 - **先硬验证，后条件路由**：`payload_keys` 确保 agent 产出了必要数据，`validation_routing` 基于已有数据做决策
 - **`when` 用于 AND 逻辑**：多个 `when` 条目串联形成"全部满足才通过"的效果
@@ -856,7 +937,7 @@ Orchestrator 不直接杀进程，而是通过 `cancel_requested` 标志通知 a
 - **`on_mismatch` 优先选择 `retry_current`**：让 agent 尝修正，而非直接 abort
 - **`on_mismatch_message` 要有指导性**：告诉 agent 具体哪里不对，而非泛泛的"验证失败"
 
-### 12.8 调试技巧
+### 10.7 调试技巧
 
 - 配置好 workflow 后，先用最小的 sub_step（如 `echo` 测试）验证整个链路通畅
 - 查看 `commands_log` 表了解 agent 的工具调用历史
@@ -865,7 +946,7 @@ Orchestrator 不直接杀进程，而是通过 `cancel_requested` 标志通知 a
 
 ---
 
-## 13. 快速配置模板
+## 12. 快速配置模板
 
 ### 最简单的 Big Step（一个 sub_step 的 echo 测试）
 
@@ -962,7 +1043,7 @@ big_steps:
 
 ---
 
-## 14. 关键代码引用（供验证）
+## 13. 关键代码引用（供验证）
 
 | YAML 字段 | 加载位置 | 使用位置 |
 |-----------|---------|---------|

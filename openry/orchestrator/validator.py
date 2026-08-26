@@ -136,6 +136,26 @@ def _validate_payload_value_equals(
     )
 
 
+def _validate_payload_yaml_valid(
+    ctx: ValidationContext, rule: dict[str, Any],
+) -> ValidationResult:
+    """校验 payload 中指定 key 的字符串值是否为合法 YAML 文本（硬验证）。"""
+    key = rule["key"]
+    text = ctx.payload.get(key)
+    if text is None:
+        return ValidationResult.fail(f"payload 缺少字段: {key}", key=key)
+    if not isinstance(text, str):
+        return ValidationResult.fail(f"字段 {key} 不是字符串", key=key)
+    try:
+        import yaml as _yaml
+        _yaml.safe_load(text)
+        return ValidationResult.ok()
+    except Exception as e:
+        return ValidationResult.fail(
+            f"字段 {key} 不是合法 YAML: {e}", key=key,
+        )
+
+
 def _validate_payload_value_in_set(
     ctx: ValidationContext, rule: dict[str, Any],
 ) -> ValidationResult:
@@ -374,6 +394,7 @@ VALIDATOR_REGISTRY: dict[str, Callable[[ValidationContext, dict[str, Any]], Vali
     "payload_values_not_equal": _validate_payload_values_not_equal,
     "payload_value_equals": _validate_payload_value_equals,
     "payload_value_in_set": _validate_payload_value_in_set,
+    "payload_yaml_valid": _validate_payload_yaml_valid,
     "payload_value_greater_than": _validate_payload_value_greater_than,
     "payload_value_less_than": _validate_payload_value_less_than,
     "payload_type": _validate_payload_type,

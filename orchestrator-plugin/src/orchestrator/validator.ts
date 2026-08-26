@@ -6,6 +6,7 @@
  */
 import * as fs from "node:fs";
 import { Ajv } from "ajv";
+import * as yaml from "js-yaml";
 
 const ajv = new Ajv({ allErrors: true });
 
@@ -56,6 +57,30 @@ function _valuesEqual(
     message: `values not equal: ${rule.key_a}=${JSON.stringify(a)} != ${rule.key_b}=${JSON.stringify(b)}`,
     details: { key_a: rule.key_a, key_b: rule.key_b, val_a: a, val_b: b },
   };
+}
+
+function _yamlValid(
+  payload: Record<string, unknown>,
+  rule: ValidationRule,
+): ValidationResult {
+  const key = rule.key ?? "";
+  const text = payload[key];
+  if (text === undefined || text === null) {
+    return { passed: false, message: `payload 缺少字段: ${key}`, details: { key } };
+  }
+  if (typeof text !== "string") {
+    return { passed: false, message: `字段 ${key} 不是字符串`, details: { key } };
+  }
+  try {
+    yaml.load(text);
+    return { passed: true, message: "", details: {} };
+  } catch (err) {
+    return {
+      passed: false,
+      message: `字段 ${key} 不是合法 YAML: ${String(err)}`,
+      details: { key },
+    };
+  }
 }
 
 function _valuesNotEqual(
@@ -308,6 +333,7 @@ export const VALIDATOR_REGISTRY: Record<string, ValidatorFn> = {
   payload_values_not_equal: _valuesNotEqual,
   payload_value_equals: _valueEquals,
   payload_value_in_set: _valueInSet,
+  payload_yaml_valid: _yamlValid,
   payload_value_greater_than: _valueGreaterThan,
   payload_value_less_than: _valueLessThan,
   payload_type: _payloadType,
