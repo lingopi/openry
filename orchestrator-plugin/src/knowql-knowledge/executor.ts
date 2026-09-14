@@ -4,7 +4,7 @@
 
 import type Database from "better-sqlite3";
 import type { QueryKnowledgeRequest, QueryKnowledgeResponse, QueryKnowledgeResult } from "./types.js";
-import { planQuery, ABS_THRESHOLD } from "./planner.js";
+import { planQuery, QUERY_FLOOR } from "./planner.js";
 
 /**
  * 执行 knowledge 查询：
@@ -29,7 +29,7 @@ export async function executeQuery(
         search: req.search,
         method: "vector",
         mode,
-        threshold: ABS_THRESHOLD,
+        threshold: QUERY_FLOOR,
         candidates_above_threshold: 0,
         selected_core_ids: [],
         sort: sortDir,
@@ -43,16 +43,12 @@ export async function executeQuery(
   // 构建 primitives 过滤子句
   let primitivesFilter = "";
   if (req.primitives?.values?.length) {
-    if (req.primitives.mode === "all") {
-      // TODO: 实现 all 语义（所有指定 primitives 都要存在）
-      primitivesFilter = "";
-    } else {
-      primitivesFilter = `AND (
-        ${req.primitives.values.map(p =>
-          `json_extract(payload, '$.primitives') LIKE '%${p}%'`
-        ).join(" OR ")}
-      )`;
-    }
+    const likeClauses = req.primitives.values.map(
+      p => `json_extract(payload, '$.primitives') LIKE '%${p}%'`
+    );
+    // all：所有指定 primitives 都必须存在；any：任一即可
+    const joiner = req.primitives.mode === "all" ? " AND " : " OR ";
+    primitivesFilter = `AND (${likeClauses.join(joiner)})`;
   }
 
   // 时间过滤
@@ -106,7 +102,7 @@ export async function executeQuery(
       search: req.search,
       method: plan.method,
       mode,
-      threshold: ABS_THRESHOLD,
+      threshold: QUERY_FLOOR,
       candidates_above_threshold: plan.rankings.length,
       selected_core_ids: plan.coreIds,
       sort: sortDir,
