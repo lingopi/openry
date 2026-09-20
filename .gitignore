@@ -14,6 +14,7 @@ venv/
 design/
 docs/
 example/
+test_floder/
 recode.md
 session执行过程.md
 
@@ -23,6 +24,7 @@ openclaw-latest/
 # Source copies — now live in seed/ (the single source of truth)
 /prompts/
 /policies/
+/loop-engineering/
 bundle-openry.sh
 
 # Dependencies & release assets — managed by Git LFS

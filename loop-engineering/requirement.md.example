@@ -1,8 +1,0 @@
-# 需求描述（纯自然语言，全文会被原样读取并传给计划 agent）
-
-写一个 workflow：读取 /tmp/openry_loop_demo_input.txt 的内容，
-统计行数，然后把「内容 + 行数」写进 /tmp/openry_loop_demo_output.txt。
-
-要求：
-1. 输出文件最后一行必须是 "DONE"
-2. 如果输入文件不存在，先创建它并写入三行示例文本

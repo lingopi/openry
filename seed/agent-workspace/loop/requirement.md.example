@@ -1,0 +1,12 @@
+# 需求描述（纯自然语言，全文会被原样读取）
+
+请构建一个 workflow，分三个步骤完成以下任务：
+
+1. 读取文件 /tmp/openry_demo_notes.txt 的全部内容
+2. 统计该文件的行数和字数
+3. 把「原文 + 行数 + 字数」整理后写入 /tmp/openry_demo_summary.txt，
+   输出文件的最后一行必须是 "DONE"
+
+要求：
+- 如果 /tmp/openry_demo_notes.txt 不存在，先创建它并写入三行示例文本
+- 统计结果要准确，格式清晰

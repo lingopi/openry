@@ -6,11 +6,11 @@
 #   loop_trigger_run（agent：echo 开始了 + 上报 run_time/ref + 条件路由）
 #        │  on_match: loop_target（定值，on_match 暂不支持变量）
 #        ▼
-#   loop_target（环节二生成的 workflow，定值 ref；每次迭代覆写同一文件）
+#   loop_target（播种阶段生成的 workflow，定值 ref；每次迭代覆写同一文件）
 #        │
 #        ▼  on_success: done → 本 instance 结束
 #
-# 定值约定：loop_target —— loop_generate_yaml 的提示词写死该值，
+# 定值约定：loop_target —— 生成器提示词写死该值，
 # 并在生成后做硬验证（生成的 composition 第一个 big_step ref 必须是它）。
 #
 # 后续步骤（失败分析 / 修复 / 归档）待实现。
@@ -26,6 +26,6 @@ big_steps:
     on_success: loop_target       # 兜底；正常由 start_and_jump 的条件路由跳转
     on_failure: abort
 
-  - ref: loop_target              # 定值 ref：由环节二生成 / 覆写
+  - ref: loop_target              # 定值 ref：由播种阶段生成 / 覆写
     on_success: done
     on_failure: abort

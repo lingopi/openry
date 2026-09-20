@@ -1,30 +1,27 @@
 # ============================================================================
-# loop_seed_build — 播种阶段 Big Step：读需求 → 计划 → 构建 → 校验 → 路由
+# loop_seed_build — 播种 Big Step（测试版：已配第①②③④⑤步）
 # ============================================================================
-# sub_step 链（全部串行）：
-#   ① read_requirement_md   shell：cat 需求全文（semantic_reporting: false 跳过蒸馏）
-#   ② plan_workflow         agent：把用户需求做成执行步骤方案（只产出 plan_text）
-#   ②.5 write_plan_md       shell：把 plan_text 写入 plan.md（write-file）
-#   ③ build_initial_yaml    agent：生成两份 YAML 内容进 payload（只做大脑，禁止写）
-#   ③.5 write_*_yaml        shell：write-file 写盘两个 loop_target 文件 + verify yaml
-#   ④ verify_seed_yaml      shell 入场券：name/ref 非定值就地修复，不可修才回环
-#   ⑤ route_to_run          agent 路由：yaml_valid=true → 跨 composition 跳 loop_trigger_run
-#
-# 注：shell 步骤的 payload 只含 stdout 提取的 key；agent 步骤必须显式回传
-#     需要保留的 key（不自动合并）。见 config-building-guide.md。
+# sub_step 链（完整版）：
+#   ① read_requirement_md    shell：cat 需求全文（semantic_reporting: false）  ← 已测试通过
+#   ② plan_workflow          agent：需求 → 执行步骤方案（只产出 plan_text）    ← prompt_blocks 化
+#   ②.5 write_plan_md        shell：把 plan_text 写入 plan.md（write-file）     ← 已测试通过
+#   ③ build_initial_yaml     agent：生成两份 YAML 内容进 payload（只做大脑）    ← prompt_blocks 化
+#   ③.5 write_*_yaml         shell：把内容写入两个 loop_target 文件 + 验证     ← 已测试通过
+#   ④ verify_seed_yaml       shell 入场券：name/ref 就地修复，不可修才回环    ← 待测试
+#   ⑤ route_to_run           agent 路由：跳 loop_trigger_run                   ← prompt_blocks 化
 # ============================================================================
 name: loop_seed_build
-version: "1.5-filebridge"
-description: "读取需求全文 → 制定执行计划 → 生成内容（只做大脑）→ shell 写盘 → 入场券校验 → 路由"
+version: "0.10-filebridge"
+description: "播种阶段（agent 全部 prompt_blocks + note，无 description）"
 timeout_minutes: 45
 max_retries: 0
 
 sub_steps:
-  # ── ① shell 读取需求全文（不做蒸馏，全文进 _stdout 传给下游）──
+  # ── ① shell 读取需求全文（不做蒸馏，全文进 _stdout）──
   - id: read_requirement_md
     kind: shell
     note: "cat 需求全文，跳过语义蒸馏"
-    command: cat /Users/yifan/.openry/agent-workspace/loop/requirement.md
+    command: cat __OPENRY_HOME__/agent-workspace/loop/requirement.md
     semantic_reporting: false      # 跳过语义蒸馏（避免 spawn 蒸馏 agent）
     timeout_seconds: 30
     on_success: plan_workflow
@@ -64,7 +61,7 @@ sub_steps:
     inherit_payload: true
     command: >
       printf '%s' ${payload.plan_text} |
-      openry write-file --path /Users/yifan/.openry/agent-workspace/test/loop/plan.md --stdin --force
+      openry write-file --path __OPENRY_HOME__/agent-workspace/loop/plan.md --stdin --force
     payload_keys: [written, bytes, path]
     semantic_reporting: false
     on_success: build_initial_yaml
@@ -84,7 +81,7 @@ sub_steps:
         path: "~/.openry/prompts/config-building-guide.md"
         label: "配置构建思路指南（怎么想）"
       - type: file
-        path: "~/.openry/agent-workspace/test/loop/plan.md"
+        path: "~/.openry/agent-workspace/loop/plan.md"
         label: "执行计划（② 的产出，文件桥注入）"
       - type: file
         path: "~/.openry/agent-workspace/loop/requirement.md"
@@ -93,19 +90,19 @@ sub_steps:
         label: "生成目标硬性约定（不可违反）"
         content: |
           1. 文件固定为：
-             /Users/yifan/.openry/workflows/loop_target.yaml（name 必须是 loop_target）
-             /Users/yifan/.openry/compositions/loop_target.yaml（big_steps 第一个 ref 必须是 loop_target，on_success: done）
+             __OPENRY_HOME__/workflows/loop_target.yaml（name 必须是 loop_target）
+             __OPENRY_HOME__/compositions/loop_target.yaml（big_steps 第一个 ref 必须是 loop_target，on_success: done）
           2. workflow 内所有 sub_step id 以 t_ 开头且互不重复
           3. 所有 sub_step 一律 kind: agent，提示词用 prompt_blocks 书写，
              **禁止 description**；不要写 shell 命令 / 脚本 / 插值模板
              （细节交给迭代循环边做边改）
           4. 每个 sub_step 配 note（≤50 字一句话说明）与 inherit_payload: true，
              并在上报时回传需要保留的 key
-          5. 最后一步 id 必须是 t_report_result：上报 {"step_ok": true/false}，
+          5. 最后一步 id 必须是 report_result：上报 {"step_ok": true/false}，
              on_success: done
           6. 至少一个 sub_step 配 payload_keys；每个 sub_step 配 command_policy
              blocklist（禁止 rm/sudo/chmod/chown/kill）
-          7. 每个 sub_step（含 t_report_result）配 on_dropped: loop_analyze_failure
+          7. 每个 sub_step（含 report_result）配 on_dropped: loop_analyze_failure
              （失败直接进入迭代分析修复闭环）
       - type: text
         label: "任务说明"
@@ -153,7 +150,7 @@ sub_steps:
     inherit_payload: true
     command: >
       printf '%s' ${payload.workflow_yaml} |
-      openry write-file --path /Users/yifan/.openry/workflows/loop_target.yaml --stdin --verify yaml --force
+      openry write-file --path __OPENRY_HOME__/workflows/loop_target.yaml --stdin --verify yaml --force
     payload_keys: [written, bytes, verified]
     semantic_reporting: false
     on_success: write_composition_yaml
@@ -167,7 +164,7 @@ sub_steps:
     payload_from: build_initial_yaml
     command: >
       printf '%s' ${payload.composition_yaml} |
-      openry write-file --path /Users/yifan/.openry/compositions/loop_target.yaml --stdin --verify yaml --force
+      openry write-file --path __OPENRY_HOME__/compositions/loop_target.yaml --stdin --verify yaml --force
     payload_keys: [written, bytes, verified]
     semantic_reporting: false
     on_success: verify_seed_yaml

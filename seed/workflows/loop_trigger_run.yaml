@@ -2,13 +2,13 @@
 # loop_trigger_run — 环节三 Big Step ①：启动标记 + 套娃接入（第一步）
 # ============================================================================
 # 单个 agent sub_step（start_and_jump）：
-#   1. inherit loop_generate_yaml 产出的 payload（含 ref，值为 loop_target）
+#   1. inherit route_to_run 产出的 payload（含 ref，值为 loop_target）
 #   2. echo "开始了"（运行标记）
 #   3. 上报 payload：{"run_time": 1, "ref": "<回传>"}
 #   4. 条件路由：run_time == 1 且 ref == loop_target → 跳转 loop_target（定值）
 #
 # 说明：on_match 暂不支持变量，loop_target 为定值；
-#       生成器（loop_generate_yaml）写死该值并做硬验证。
+#       生成器写死该值并做硬验证。
 # ============================================================================
 name: loop_trigger_run
 version: "1.0"
@@ -25,7 +25,7 @@ sub_steps:
       你是循环启动节点。
 
       1. 用 openry_run 执行 'echo "开始了"' 输出开始标记。
-      2. 从上方「Previous step results」读取 ref 的值（这是环节二生成的
+      2. 从上方「Previous step results」读取 ref 的值（这是播种阶段生成的
          composition 中第一个 big_step 的 ref，值为 loop_target）。
       3. 用 openry_status 上报 completed，payload 必须包含：
          {"run_time": 1, "ref": "<回传 Previous step results 中的 ref>"}

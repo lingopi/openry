@@ -494,6 +494,20 @@ if (Test-Path $seedDir) {
         # flattens single-file subdirectories (e.g. agent-workspace/ → loose AGENTS.md)
         robocopy "$seedDir" "$OpenryHome" /E /NFL /NDL /NJH /NJS 2>&1 | Out-Null
         Write-OK "Initialized $OpenryHome from seed/"
+
+        # Replace __OPENRY_HOME__ placeholder with the real OpenryHome
+        # (forward slashes so YAML scalars and the Node CLI accept them on Windows)
+        $openryHomeFwd = ($OpenryHome -replace '\\', '/')
+        Get-ChildItem -Path $OpenryHome -Recurse -File -Include *.yaml, *.md -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                $content = Get-Content -Path $_.FullName -Raw
+                if ($content -match '__OPENRY_HOME__') {
+                    Set-Content -Path $_.FullName -Value ($content -replace '__OPENRY_HOME__', $openryHomeFwd) -NoNewline -Encoding UTF8
+                }
+            }
+        # Loop chain writes plan.md / reads requirement.md from this dir
+        New-Item -ItemType Directory -Force -Path (Join-Path $OpenryHome "agent-workspace\loop") | Out-Null
+        Write-OK "Path placeholders resolved to $openryHomeFwd"
     } else {
         Write-Host "  ~/.openry already exists, preserving user data" -ForegroundColor Cyan
     }
@@ -601,16 +615,22 @@ if ((-not (Test-Path $PluginDir)) -or $SkipPlugin) {
                 $InstallErrors += "  - Plugin bundle extraction failed"
             }
 
-            # Verify dist/index.js
-            if (-not (Test-Path (Join-Path $PluginDir "dist\index.js"))) {
-                Write-Warn "dist\index.js missing, attempting rebuild..."
-                try {
-                    Push-Location $PluginDir
-                    npm run build 2>&1 | Out-Null
-                    Pop-Location
-                } catch {
-                    Pop-Location -ErrorAction SilentlyContinue
-                }
+            # Always rebuild from current source — the bundle may lack dist/
+            # or contain a stale one. node_modules (incl. typescript) comes from
+            # the bundle; src/ + tsconfig.json come from this repo checkout.
+            Write-Info "Building plugin from source (bundled dist may be stale)..."
+            Push-Location $PluginDir
+            try {
+                npm run build 2>&1 | Out-Null
+                $buildOk = ($LASTEXITCODE -eq 0)
+            } catch {
+                $buildOk = $false
+            }
+            Pop-Location
+            if ($buildOk) {
+                Write-OK "Plugin built from source"
+            } else {
+                Write-Warn "npm build failed — using bundled dist if present (may be outdated)"
             }
 
             if (-not (Test-Path (Join-Path $PluginDir "dist\index.js"))) {

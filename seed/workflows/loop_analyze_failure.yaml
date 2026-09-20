@@ -1,0 +1,129 @@
+# ============================================================================
+# loop_analyze_failure — 迭代分析修复 Big Step（v0.5-redesign）
+# ============================================================================
+# 链：提取失败块(shell 硬代码) → 分析修复(agent 自取证) → 外科修补(shell) → 跳回(agent)
+# 实例 55 重构要点：
+#   1. 砍掉 collect_evidence / locate_failed_step —— agent 自己取证自己修，
+#      不再「取一遍、分析又查一遍」。
+#   2. 提取步必须是第一跳：_inherits_from_run_id 此时才指向真正失败任务
+#      （指针每跳被上游覆盖），落地成 failed_run_id / failed_step_id。
+#   3. 提取步把失败 sub_step 的当前 YAML 块原样截取进 payload（step_yaml），
+#      agent 改的是「现状块」，不是凭空重写整个 workflow。
+#   4. 修补步 payload_from: extract_failed_step 拉取定位信息——不依赖 payload
+#      继承链（agent 上报会覆盖 payload），硬代码只更新那一个块。
+# ============================================================================
+name: loop_analyze_failure
+version: "0.5-redesign"
+description: "失败分析修复：提取失败块 → agent 自取证单块分析 → 外科修补 → 跳回运行"
+timeout_minutes: 30
+max_retries: 0
+
+sub_steps:
+  # ── ① shell 硬代码：第一跳落地指针 + 截取失败步当前 YAML 块 ──
+  - id: extract_failed_step
+    kind: shell
+    note: "截取失败 sub_step 原始块进 payload（step_yaml）"
+    inherit_payload: true
+    command: >
+      openry extract-step --path __OPENRY_HOME__/workflows/loop_target.yaml
+      --from-run-id ${payload._inherits_from_run_id}
+    payload_keys: [failed_run_id, failed_step_id, step_yaml]
+    semantic_reporting: false
+    on_success: analyze_fix
+    on_failure: abort
+
+  # ── ② agent 大脑：自取证 + 单块修复 ──
+  - id: analyze_fix
+    kind: agent
+    note: "自取证、读计划与需求，只产出失败步的修复块"
+    inherit_payload: true
+    prompt_blocks:
+      - type: file
+        path: "~/.openry/agent-workspace/loop/plan.md"
+        label: "执行计划（seed 环节产出，文件桥注入）"
+      - type: file
+        path: "~/.openry/agent-workspace/loop/requirement.md"
+        label: "用户需求（文件桥注入）"
+      - type: file
+        path: "~/.openry/prompts/compositions-and-workflows-guide.md"
+        label: "OpenRY YAML 配置参考手册（有什么）"
+      - type: file
+        path: "~/.openry/prompts/config-building-guide.md"
+        label: "配置构建思路指南（怎么想）"
+      - type: text
+        label: "修复契约（不可违反）"
+        content: |
+          你是迭代修复 agent（只做大脑，禁止写文件）。
+
+          1. 取证：调用工具 openry_analysis_sources，
+             run_id 参数显式传 Previous step results 里的 failed_run_id
+             （不要用默认解析——指针每跳会被覆盖）
+          2. Previous step results 里有 failed_step_id 和 step_yaml：
+             step_yaml 是失败 sub_step 在 workflow 文件里的当前完整 YAML 块，
+             你必须基于它修改，而不是凭空重写
+          3. 结合注入的「执行计划」与「用户需求」理解该步原意
+          4. 用 openry_status 上报 completed，payload 必须包含：
+             {"root_cause": "一句话根因",
+              "fix_suggestion": "修复要点（改了什么、为什么）",
+              "fixed_step_yaml": "修复后该 sub_step 的完整 YAML 块文本"}
+          5. fixed_step_yaml 格式：首行必须是 "- id: <failed_step_id 的值>"，
+             缩进对齐一个完整 sub_step 块（含 kind/note/prompt_blocks/
+             on_success/on_dropped 等全部字段），规范形（prompt_blocks + note，
+             禁止 description）
+          6. 只许写这一个块，禁止重写整个 workflow 或 composition——
+             硬代码只会替换你给出的这个块，其它 step 字节级不动
+          7. 长文本用 | 块标量；payload 字符串值禁止以 |- 或 | 开头
+          8. 系统会硬验证块语法，不通过会让你重改（最多 2 次）
+    on_success: patch_workflow_yaml
+    on_failure: abort
+    max_tool_calls: 20
+    max_sub_step_retries: 2
+    on_validation_fail: retry_current
+    expect_payload: true
+    payload_keys: [root_cause, fix_suggestion, fixed_step_yaml]
+    validation:
+      - type: payload_yaml_valid
+        key: fixed_step_yaml
+
+  # ── ③ shell 外科手术修补（payload_from 拉取定位，硬代码守门）──
+  - id: patch_workflow_yaml
+    kind: shell
+    note: "payload_from 拉取 failed 定位信息，硬代码只更新失败步"
+    inherit_payload: true
+    payload_from: extract_failed_step
+    command: >
+      printf '%s' ${payload.fixed_step_yaml} |
+      openry patch-yaml --path __OPENRY_HOME__/workflows/loop_target.yaml
+      --step-id ${payload.failed_step_id}
+      --from-run-id ${payload.failed_run_id}
+    payload_keys: [patched, step_id, unchanged_lines]
+    semantic_reporting: false
+    on_success: route_back
+    on_failure: abort
+    on_dropped: analyze_fix
+
+  # ── ⑤ agent 路由：跨 big step 跳回运行环节 ──
+  - id: route_back
+    kind: agent
+    note: "上报 fixed 标记，条件路由跳回 loop_trigger_run"
+    inherit_payload: true
+    prompt_blocks:
+      - type: text
+        label: "任务"
+        content: |
+          你是路由节点。用 openry_status 上报 completed，payload：
+          {"fixed": true}
+          不要改动任何其他值。
+    on_success: done
+    on_failure: abort
+    max_tool_calls: 5
+    expect_payload: true
+    payload_keys: [fixed]
+    validation_routing:
+      - when:
+          type: payload_value_equals
+          key: fixed
+          value: true
+        on_match: loop_trigger_run
+        on_mismatch: abort
+        on_mismatch_message: "fixed 必须为 true"

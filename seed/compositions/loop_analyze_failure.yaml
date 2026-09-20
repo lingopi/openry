@@ -1,0 +1,11 @@
+# ============================================================================
+# loop_analyze_failure — Composition（standalone，跨 big step 跳入/跳回）
+# ============================================================================
+name: loop_analyze_failure
+version: "1.0"
+description: "失败分析修复环节"
+
+big_steps:
+  - ref: loop_analyze_failure
+    on_success: done
+    on_failure: abort

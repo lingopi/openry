@@ -389,6 +389,17 @@ if [ -d "$SEED_DIR" ]; then
     if [ ! -d "$OPENRY_HOME/workflows" ]; then
         cp -r "$SEED_DIR"/* "$OPENRY_HOME/" 2>/dev/null || true
         echo -e "  ${GREEN}✓${NC} Initialized ${CYAN}${OPENRY_HOME}${NC} from seed/"
+
+        # Replace __OPENRY_HOME__ placeholder with the real OPENRY_HOME
+        # (loop-engineering configs embed machine-agnostic placeholders)
+        if sed --version >/dev/null 2>&1; then
+            find "$OPENRY_HOME" -type f \( -name '*.yaml' -o -name '*.md' \) -exec sed -i "s|__OPENRY_HOME__|${OPENRY_HOME}|g" {} +
+        else
+            find "$OPENRY_HOME" -type f \( -name '*.yaml' -o -name '*.md' \) -exec sed -i '' "s|__OPENRY_HOME__|${OPENRY_HOME}|g" {} +
+        fi
+        # Loop chain writes plan.md / reads requirement.md from this dir
+        mkdir -p "$OPENRY_HOME/agent-workspace/loop"
+        echo -e "  ${GREEN}✓${NC} Path placeholders resolved to ${CYAN}${OPENRY_HOME}${NC}"
     else
         echo -e "  ${CYAN}~/.openry already exists, preserving user data${NC}"
     fi
@@ -462,10 +473,11 @@ else
         echo -e "  ${GREEN}✓${NC} Cleaned"
 
         # ── Resolve plugin bundle ──
-        PLUGIN_BUNDLE_NAME="orchestrator-plugin-bundle-${OS_NAME}.tar.gz"
-        # Bundle path: both macOS and Linux use deps/macos/ for now
+        # Both macOS and Linux use the macOS bundle (node_modules is darwin-only,
+        # but dist/ + JS deps are platform-independent; build step regenerates dist)
+        PLUGIN_BUNDLE_NAME="orchestrator-plugin-bundle-macos.tar.gz"
         PLUGIN_BUNDLE_LOCAL="${SCRIPT_DIR}/deps/macos/${PLUGIN_BUNDLE_NAME}"
-        PLUGIN_SHA256="632da2069a8ad8df66f5046778e3c134e01c6f60151d616f0074cc3d06b82774"
+        PLUGIN_SHA256="5909482aa543af138134563cc0455d9a3a535e694e0b8eb35620ac82ee362106"
 
         BUNDLE_FILE=""
         BUNDLE_FILE=$(resolve_asset "$PLUGIN_BUNDLE_NAME" "$PLUGIN_BUNDLE_LOCAL" \
@@ -485,11 +497,18 @@ else
                 INSTALL_ERRORS="${INSTALL_ERRORS}  - Plugin bundle extraction failed\n"
             fi
 
-            # Verify dist/index.js
-            if [ ! -f "$PLUGIN_DIR/dist/index.js" ]; then
-                echo -e "  ${YELLOW}⚠ dist/index.js missing, attempting rebuild...${NC}"
-                cd "$PLUGIN_DIR" && npm run build 2>/dev/null || true
-                cd "$SCRIPT_DIR"
+            # Always rebuild from current source — the bundled dist/ may be stale.
+            # The bundle provides node_modules (incl. typescript); src/ + tsconfig
+            # come from this repo, so the build output always matches the checkout.
+            echo -e "  Building plugin from source (bundled dist may be stale)..."
+            BUILD_OK=false
+            if ( cd "$PLUGIN_DIR" && npm run build ) >/dev/null 2>&1; then
+                BUILD_OK=true
+            fi
+            if [ "$BUILD_OK" = true ]; then
+                echo -e "  ${GREEN}✓${NC} Plugin built from source"
+            else
+                echo -e "  ${YELLOW}⚠ npm build failed — using bundled dist if present (may be outdated)${NC}"
             fi
 
             # ── Sync tool config from seed/tools.yaml BEFORE plugin registration ──
